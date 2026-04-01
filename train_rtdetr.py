@@ -2,6 +2,7 @@
 import argparse
 import json
 import shutil
+import urllib.request
 from pathlib import Path
 from typing import Iterable, List
 
@@ -9,6 +10,12 @@ import numpy as np
 from PIL import Image
 from torch.utils.tensorboard import SummaryWriter
 from ultralytics import RTDETR
+
+
+COCO_PRETRAINED_WEIGHTS = {
+    "coco-rtdetr-l": "https://github.com/ultralytics/assets/releases/download/v8.0.0/rtdetr-l.pt",
+    "coco-rtdetr-x": "https://github.com/ultralytics/assets/releases/download/v8.0.0/rtdetr-x.pt",
+}
 
 
 def _val_loss_total(row: dict) -> float:
@@ -23,13 +30,36 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train RT-DETR on TIFF + YOLO labels dataset.")
     parser.add_argument("--dataset-root", type=Path, required=True, help="YOLO dataset root directory.")
     parser.add_argument("--class-names", nargs="+", required=True, help="Class names, e.g. --class-names person car")
-    parser.add_argument("--model", type=str, default="rtdetr-l.pt", help="RT-DETR pretrained weight or model yaml.")
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="rtdetr-l.pt",
+        help="RT-DETR weight/model yaml, or preset key: coco-rtdetr-l / coco-rtdetr-x.",
+    )
+    parser.add_argument(
+        "--weights-dir",
+        type=Path,
+        default=Path("weights"),
+        help="Directory for downloaded preset weights.",
+    )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--project", type=str, default="runs/detect")
     parser.add_argument("--name", type=str, default="rtdetr_train")
     return parser.parse_args()
+
+
+def resolve_model_path(model: str, weights_dir: Path) -> str:
+    if model not in COCO_PRETRAINED_WEIGHTS:
+        return model
+
+    url = COCO_PRETRAINED_WEIGHTS[model]
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    dst = weights_dir / Path(url).name
+    if not dst.exists():
+        urllib.request.urlretrieve(url, dst)
+    return str(dst)
 
 
 def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
@@ -172,8 +202,9 @@ def main() -> None:
 
     prepared_root = convert_tifs_to_float32(args.dataset_root)
     data_yaml = write_data_yaml(prepared_root, args.class_names)
+    model_path = resolve_model_path(args.model, args.weights_dir)
 
-    model = RTDETR(args.model)
+    model = RTDETR(model_path)
     run_dir = Path(args.project) / args.name
     tb_writer = SummaryWriter(log_dir=str(run_dir))
 
