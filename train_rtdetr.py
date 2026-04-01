@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reuse-prepared",
         action="store_true",
-        help="Reuse existing prepared dataset directory if it already exists.",
+        help="Explicitly request reusing existing prepared dataset directory if it already exists (default behavior).",
     )
     parser.add_argument(
         "--force-rebuild-prepared",
@@ -109,7 +109,7 @@ def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
     raise TypeError(f"Unsupported array dtype: {arr.dtype}")
 
 
-def convert_tifs_to_float32(dataset_root: Path, reuse_prepared: bool = True, force_rebuild_prepared: bool = False) -> Path:
+def convert_tifs_to_float32(dataset_root: Path, reuse_prepared: bool = False, force_rebuild_prepared: bool = False) -> Path:
     prepared_root = dataset_root.parent / f"{dataset_root.name}_prepared"
     if reuse_prepared and force_rebuild_prepared:
         raise ValueError("--reuse-prepared and --force-rebuild-prepared cannot be used together.")
@@ -170,7 +170,8 @@ def _load_results_csv(run_dir: Path) -> Iterable[dict]:
         for raw_row in reader:
             row = {}
             for h, p in raw_row.items():
-                if not isinstance(h, str):
+                # csv.DictReader sets key=None when a row has more fields than headers.
+                if h is None:
                     continue
                 try:
                     row[h] = float(p)
