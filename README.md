@@ -41,6 +41,10 @@ python train_rtdetr.py \
   - `--model /path/to/your_model.pt`
   - `--model rtdetr-l.pt`
 - 当 `--model` 取 `coco-rtdetr-l` 或 `coco-rtdetr-x` 时，脚本会从公开地址下载权重到 `weights/`（可用 `--weights-dir` 修改）。
+- 数据预处理目录默认为 `<dataset-root>_prepared`：
+  - 若该目录已存在，默认直接复用；
+  - 可使用 `--force-rebuild-prepared` 强制重建；
+  - 可使用 `--reuse-prepared` 显式声明复用（与 `--force-rebuild-prepared` 互斥）。
 
 ## TensorBoard 监控
 

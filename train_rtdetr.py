@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import csv
 import json
 import shutil
 import urllib.request
@@ -48,6 +49,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--project", type=str, default="runs/detect")
     parser.add_argument("--name", type=str, default="rtdetr_train")
+    parser.add_argument(
+        "--reuse-prepared",
+        action="store_true",
+        help="Reuse existing prepared dataset directory if it already exists.",
+    )
+    parser.add_argument(
+        "--force-rebuild-prepared",
+        action="store_true",
+        help="Force rebuild prepared dataset directory even if it already exists.",
+    )
     return parser.parse_args()
 
 
@@ -98,13 +109,20 @@ def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
     raise TypeError(f"Unsupported array dtype: {arr.dtype}")
 
 
-def convert_tifs_to_float32(dataset_root: Path) -> Path:
+def convert_tifs_to_float32(dataset_root: Path, reuse_prepared: bool = False, force_rebuild_prepared: bool = False) -> Path:
     prepared_root = dataset_root.parent / f"{dataset_root.name}_prepared"
+    if reuse_prepared and force_rebuild_prepared:
+        raise ValueError("--reuse-prepared and --force-rebuild-prepared cannot be used together.")
     if prepared_root.exists():
-        try:
-            shutil.rmtree(prepared_root)
-        except OSError as exc:
-            raise RuntimeError(f"Failed to clean prepared dataset directory: {prepared_root}") from exc
+        if reuse_prepared:
+            return prepared_root
+        if force_rebuild_prepared:
+            try:
+                shutil.rmtree(prepared_root)
+            except OSError as exc:
+                raise RuntimeError(f"Failed to clean prepared dataset directory: {prepared_root}") from exc
+        else:
+            return prepared_root
     shutil.copytree(dataset_root, prepared_root)
 
     for split in ("train", "val"):
@@ -146,20 +164,22 @@ def _load_results_csv(run_dir: Path) -> Iterable[dict]:
     results_csv = run_dir / "results.csv"
     if not results_csv.exists():
         return []
-    lines = [ln.strip() for ln in results_csv.read_text(encoding="utf-8").splitlines() if ln.strip()]
-    if not lines:
-        return []
-    headers = [h.strip() for h in lines[0].split(",")]
     rows = []
-    for line in lines[1:]:
-        parts = [p.strip() for p in line.split(",")]
-        row = {}
-        for h, p in zip(headers, parts):
-            try:
-                row[h] = float(p)
-            except ValueError:
-                row[h] = p
-        rows.append(row)
+    with results_csv.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        for raw_row in reader:
+            row = {}
+            for h, p in raw_row.items():
+                key = (h or "").strip()
+                value = (p or "").strip()
+                if not key:
+                    continue
+                try:
+                    row[key] = float(value)
+                except ValueError:
+                    row[key] = value
+            if row:
+                rows.append(row)
     return rows
 
 
@@ -208,40 +228,67 @@ def export_tensorboard_and_best(run_dir: Path) -> None:
 def main() -> None:
     args = parse_args()
 
-    prepared_root = convert_tifs_to_float32(args.dataset_root)
+    prepared_root = convert_tifs_to_float32(
+        args.dataset_root,
+        reuse_prepared=args.reuse_prepared,
+        force_rebuild_prepared=args.force_rebuild_prepared,
+    )
     data_yaml = write_data_yaml(prepared_root, args.class_names)
     model_path = resolve_model_path(args.model, args.weights_dir)
 
     model = RTDETR(model_path)
-    run_dir = Path(args.project) / args.name
-    tb_writer = SummaryWriter(log_dir=str(run_dir))
+    default_run_dir = Path(args.project) / args.name
+    tb_writer = None
+
+    def _get_tb_writer(trainer) -> SummaryWriter:
+        nonlocal tb_writer
+        if tb_writer is None:
+            trainer_run_dir = getattr(trainer, "save_dir", None)
+            log_dir = Path(trainer_run_dir) if trainer_run_dir else default_run_dir
+            tb_writer = SummaryWriter(log_dir=str(log_dir))
+        return tb_writer
+
+    def _close_tb_writer() -> None:
+        nonlocal tb_writer
+        if tb_writer is not None:
+            tb_writer.flush()
+            tb_writer.close()
+            tb_writer = None
 
     def on_fit_epoch_end(trainer) -> None:
+        writer = _get_tb_writer(trainer)
         metrics = getattr(trainer, "metrics", {})
         epoch = int(getattr(trainer, "epoch", 0))
         for key, value in metrics.items():
             if isinstance(value, (int, float)):
-                tb_writer.add_scalar(str(key), float(value), epoch)
+                writer.add_scalar(str(key), float(value), epoch)
         val_loss = _val_loss_total(metrics)
         if np.isfinite(val_loss):
-            tb_writer.add_scalar("val/loss_total", val_loss, epoch)
+            writer.add_scalar("val/loss_total", val_loss, epoch)
 
     def on_train_end(trainer) -> None:
-        tb_writer.flush()
-        tb_writer.close()
+        _close_tb_writer()
 
     model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
     model.add_callback("on_train_end", on_train_end)
-    model.train(
-        data=str(data_yaml),
-        epochs=args.epochs,
-        batch=args.batch,
-        imgsz=args.imgsz,
-        project=args.project,
-        name=args.name,
-        save_period=1,
-    )
+    try:
+        train_result = model.train(
+            data=str(data_yaml),
+            epochs=args.epochs,
+            batch=args.batch,
+            imgsz=args.imgsz,
+            project=args.project,
+            name=args.name,
+            save_period=1,
+        )
+    finally:
+        _close_tb_writer()
 
+    save_dir = getattr(train_result, "save_dir", None)
+    if save_dir is None:
+        trainer = getattr(model, "trainer", None)
+        save_dir = getattr(trainer, "save_dir", None) if trainer is not None else None
+    run_dir = Path(save_dir) if save_dir else default_run_dir
     export_tensorboard_and_best(run_dir)
     print(f"Training completed. Run dir: {run_dir}")
     print(f"Best val loss checkpoint: {run_dir / 'weights' / 'best_val_loss.pt'}")
