@@ -3,6 +3,7 @@ import argparse
 import json
 import shutil
 import urllib.request
+from urllib.error import URLError
 from pathlib import Path
 from typing import Iterable, List
 
@@ -58,11 +59,15 @@ def resolve_model_path(model: str, weights_dir: Path) -> str:
     weights_dir.mkdir(parents=True, exist_ok=True)
     dst = weights_dir / Path(url).name
     if not dst.exists():
-        urllib.request.urlretrieve(url, dst)
+        try:
+            urllib.request.urlretrieve(url, dst)
+        except URLError as exc:
+            raise RuntimeError(f"Failed to download preset model '{model}' from {url}: {exc}") from exc
     return str(dst)
 
 
 def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
+    # 6-bit TIFF data is expected in [0, 63], so normalize by 63 in that case.
     arr = np.asarray(arr)
     if arr.ndim == 3:
         arr = arr.mean(axis=2)
@@ -96,7 +101,10 @@ def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
 def convert_tifs_to_float32(dataset_root: Path) -> Path:
     prepared_root = dataset_root.parent / f"{dataset_root.name}_prepared"
     if prepared_root.exists():
-        shutil.rmtree(prepared_root)
+        try:
+            shutil.rmtree(prepared_root)
+        except OSError as exc:
+            raise RuntimeError(f"Failed to clean prepared dataset directory: {prepared_root}") from exc
     shutil.copytree(dataset_root, prepared_root)
 
     for split in ("train", "val"):
