@@ -109,7 +109,7 @@ def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
     raise TypeError(f"Unsupported array dtype: {arr.dtype}")
 
 
-def convert_tifs_to_float32(dataset_root: Path, reuse_prepared: bool = False, force_rebuild_prepared: bool = False) -> Path:
+def convert_tifs_to_float32(dataset_root: Path, reuse_prepared: bool = True, force_rebuild_prepared: bool = False) -> Path:
     prepared_root = dataset_root.parent / f"{dataset_root.name}_prepared"
     if reuse_prepared and force_rebuild_prepared:
         raise ValueError("--reuse-prepared and --force-rebuild-prepared cannot be used together.")
@@ -170,14 +170,12 @@ def _load_results_csv(run_dir: Path) -> Iterable[dict]:
         for raw_row in reader:
             row = {}
             for h, p in raw_row.items():
-                key = (h or "").strip()
-                value = (p or "").strip()
-                if not key:
+                if h is None:
                     continue
                 try:
-                    row[key] = float(value)
+                    row[h] = float(p)
                 except ValueError:
-                    row[key] = value
+                    row[h] = p
             if row:
                 rows.append(row)
     return rows
