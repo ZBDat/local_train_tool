@@ -32,29 +32,38 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _convert_to_uint8(arr: np.ndarray) -> np.ndarray:
+def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
     arr = np.asarray(arr)
+    if arr.ndim == 3:
+        arr = arr.mean(axis=2)
+    elif arr.ndim > 3:
+        arr = np.squeeze(arr)
+        if arr.ndim == 3:
+            arr = arr.mean(axis=2)
+    if arr.ndim != 2:
+        raise TypeError(f"Unsupported array shape: {arr.shape}")
+
     if np.issubdtype(arr.dtype, np.integer):
         max_val = int(arr.max()) if arr.size else 0
+        if max_val <= 0:
+            return np.zeros_like(arr, dtype=np.float32)
         if max_val <= 63:
-            return (arr.astype(np.float32) * (255.0 / 63.0)).astype(np.uint8)
-        if max_val <= 255:
-            return arr.astype(np.uint8)
-        return (arr.astype(np.uint32) * 255 // max_val).astype(np.uint8)
+            return arr.astype(np.float32) / 63.0
+        return arr.astype(np.float32) / float(max_val)
     if np.issubdtype(arr.dtype, np.floating):
         finite = arr[np.isfinite(arr)]
         if finite.size == 0:
-            return np.zeros_like(arr, dtype=np.uint8)
+            return np.zeros_like(arr, dtype=np.float32)
         min_val = float(finite.min())
         max_val = float(finite.max())
         if max_val <= min_val:
-            return np.zeros_like(arr, dtype=np.uint8)
-        scaled = (np.clip(arr, min_val, max_val) - min_val) * (255.0 / (max_val - min_val))
-        return scaled.astype(np.uint8)
-    raise TypeError(f"Unsupported tif dtype: {arr.dtype}")
+            return np.zeros_like(arr, dtype=np.float32)
+        scaled = (np.clip(arr, min_val, max_val) - min_val) / (max_val - min_val)
+        return scaled.astype(np.float32)
+    raise TypeError(f"Unsupported array dtype: {arr.dtype}")
 
 
-def convert_tifs_to_png(dataset_root: Path) -> Path:
+def convert_tifs_to_float32(dataset_root: Path) -> Path:
     prepared_root = dataset_root.parent / f"{dataset_root.name}_prepared"
     if prepared_root.exists():
         shutil.rmtree(prepared_root)
@@ -67,10 +76,11 @@ def convert_tifs_to_png(dataset_root: Path) -> Path:
         for tif_path in list(image_dir.glob("*.tif")) + list(image_dir.glob("*.tiff")):
             with Image.open(tif_path) as img:
                 arr = np.array(img)
-            arr8 = _convert_to_uint8(arr)
-            png_path = tif_path.with_suffix(".png")
-            Image.fromarray(arr8).save(png_path)
-            tif_path.unlink()
+            arr_f32 = _convert_to_float32_single_channel(arr)
+            save_path = tif_path.with_suffix(".tif")
+            Image.fromarray(arr_f32, mode="F").save(save_path)
+            if tif_path != save_path:
+                tif_path.unlink()
     return prepared_root
 
 
@@ -160,7 +170,7 @@ def export_tensorboard_and_best(run_dir: Path) -> None:
 def main() -> None:
     args = parse_args()
 
-    prepared_root = convert_tifs_to_png(args.dataset_root)
+    prepared_root = convert_tifs_to_float32(args.dataset_root)
     data_yaml = write_data_yaml(prepared_root, args.class_names)
 
     model = RTDETR(args.model)

@@ -7,7 +7,7 @@
 - 读取数据集（YOLO 目录结构）：
   - `images/train`, `images/val`
   - `labels/train`, `labels/val`
-- 将 TIFF 图像转换为 8-bit PNG（当像素范围为 0~63 时按 6-bit 数据线性映射）
+- 将 TIFF 图像转换为 **float32 单通道 TIFF**（不使用 8-bit PNG；当像素范围为 0~63 时按 6-bit 线性归一化）
 - 使用 `ultralytics` 的 RT-DETR 训练
 - 训练期间写入 TensorBoard（损失曲线）
 - 训练期间按 `val/box_loss + val/cls_loss + val/dfl_loss` 选出并保存最优权重：
