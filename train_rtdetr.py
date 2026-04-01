@@ -170,11 +170,11 @@ def _load_results_csv(run_dir: Path) -> Iterable[dict]:
         for raw_row in reader:
             row = {}
             for h, p in raw_row.items():
-                if h is None:
+                if not isinstance(h, str):
                     continue
                 try:
                     row[h] = float(p)
-                except ValueError:
+                except (TypeError, ValueError):
                     row[h] = p
             if row:
                 rows.append(row)
@@ -221,6 +221,14 @@ def export_tensorboard_and_best(run_dir: Path) -> None:
         json.dumps({"best_epoch": best_epoch, "best_val_loss": best_loss, "metrics": best_row}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def _resolve_run_dir(train_result, model: RTDETR, default_run_dir: Path) -> Path:
+    save_dir = getattr(train_result, "save_dir", None)
+    if save_dir is None:
+        trainer = getattr(model, "trainer", None)
+        save_dir = getattr(trainer, "save_dir", None) if trainer is not None else None
+    return Path(save_dir) if save_dir else default_run_dir
 
 
 def main() -> None:
@@ -282,11 +290,7 @@ def main() -> None:
     finally:
         _close_tb_writer()
 
-    save_dir = getattr(train_result, "save_dir", None)
-    if save_dir is None:
-        trainer = getattr(model, "trainer", None)
-        save_dir = getattr(trainer, "save_dir", None) if trainer is not None else None
-    run_dir = Path(save_dir) if save_dir else default_run_dir
+    run_dir = _resolve_run_dir(train_result, model, default_run_dir)
     export_tensorboard_and_best(run_dir)
     print(f"Training completed. Run dir: {run_dir}")
     print(f"Best val loss checkpoint: {run_dir / 'weights' / 'best_val_loss.pt'}")
