@@ -65,8 +65,7 @@ python train_rtdetr.py \
 ```
 
 说明：
-- 也可以继续用本地模型路径或 `rtdetr-l.pt` / `rtdetr-x.pt`：
-- 也可以使用本地模型路径或官方权重名（例如：`rtdetr-l.pt`、`yolo11x.pt`、`yolov8x.pt`）：
+- 可使用本地模型路径或官方权重名（例如：`rtdetr-l.pt`、`rtdetr-x.pt`、`yolo11x.pt`、`yolov8x.pt`）：
   - `--model /path/to/your_model.pt`
   - `--model rtdetr-l.pt`
 - 当 `--model` 取 `coco-rtdetr-l` 或 `coco-rtdetr-x` 时，脚本会从公开地址下载权重到 `weights/`（可用 `--weights-dir` 修改）；下载仅允许 `https://github.com`，并会校验目标文件名及落盘路径安全性。

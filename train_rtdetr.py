@@ -39,6 +39,7 @@ MODEL_PRESETS: Dict[str, Dict[str, str]] = {
         "model": "yolov8x.pt",
     },
 }
+MODEL_PRESET_KEYS_TEXT = " / ".join(sorted(MODEL_PRESETS.keys()))
 TRUSTED_WEIGHT_HOSTS = {"github.com"}
 SAFE_WEIGHT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+\.pt$")
 
@@ -65,7 +66,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="rtdetr-l.pt",
-        help=f"Model weight/model yaml path, or preset key: {' / '.join(sorted(MODEL_PRESETS.keys()))}.",
+        help=f"Model weight/model yaml path, or preset key: {MODEL_PRESET_KEYS_TEXT}.",
     )
     parser.add_argument(
         "--weights-dir",
@@ -145,7 +146,7 @@ def _safe_download_preset_weight(url: str, weights_dir: Path) -> Path:
     weights_dir.mkdir(parents=True, exist_ok=True)
     root = weights_dir.resolve()
     dst = (weights_dir / filename).resolve()
-    if root != dst.parent:
+    if root != dst.parent or (hasattr(dst, "is_relative_to") and not dst.is_relative_to(root)):
         raise RuntimeError(f"Invalid preset weight destination path: {dst}")
 
     if not dst.exists():
