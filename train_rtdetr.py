@@ -38,6 +38,30 @@ MODEL_PRESETS: Dict[str, Dict[str, str]] = {
         "family": "yolo",
         "model": "yolov8x.pt",
     },
+    "coco-deformable-detr-l": {
+        "family": "yolo",
+        "model": "deformable-detr-l.pt",
+    },
+    "coco-deformable-detr-x": {
+        "family": "yolo",
+        "model": "deformable-detr-x.pt",
+    },
+    "coco-dino-l": {
+        "family": "yolo",
+        "model": "dino-l.pt",
+    },
+    "coco-dino-x": {
+        "family": "yolo",
+        "model": "dino-x.pt",
+    },
+    "coco-nino-l": {
+        "family": "yolo",
+        "model": "dino-l.pt",
+    },
+    "coco-nino-x": {
+        "family": "yolo",
+        "model": "dino-x.pt",
+    },
 }
 MODEL_PRESET_KEYS_TEXT = " / ".join(sorted(MODEL_PRESETS.keys()))
 TRUSTED_WEIGHT_HOSTS = {"github.com"}
@@ -130,6 +154,8 @@ def _infer_model_family(model_ref: str) -> str:
     lowered = model_ref.lower()
     if "rtdetr" in lowered:
         return "rtdetr"
+    if any(token in lowered for token in ("deformable", "dino", "nino")):
+        return "yolo"
     return "yolo"
 
 
