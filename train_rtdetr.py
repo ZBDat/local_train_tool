@@ -146,12 +146,12 @@ def _safe_download_preset_weight(url: str, weights_dir: Path) -> Path:
     weights_dir.mkdir(parents=True, exist_ok=True)
     root = weights_dir.resolve()
     dst = (weights_dir / filename).resolve()
-    if root != dst.parent or (hasattr(dst, "is_relative_to") and not dst.is_relative_to(root)):
+    if root != dst.parent:
         raise RuntimeError(f"Invalid preset weight destination path: {dst}")
 
     if not dst.exists():
         try:
-            with urllib.request.urlopen(url, timeout=300) as response:
+            with urllib.request.urlopen(url, timeout=120) as response:
                 final_url = response.geturl()
                 final_parsed = urlparse(final_url)
                 if not final_parsed.hostname or final_parsed.hostname.lower() not in TRUSTED_WEIGHT_HOSTS:
