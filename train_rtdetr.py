@@ -3,22 +3,70 @@ import argparse
 import csv
 import json
 import random
+import re
 import shutil
 import urllib.request
 from urllib.error import URLError
+from urllib.parse import urlparse
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 from PIL import Image, ImageFilter
 from torch.utils.tensorboard import SummaryWriter
-from ultralytics import RTDETR
+from ultralytics import RTDETR, YOLO
 
 
-COCO_PRETRAINED_WEIGHTS = {
-    "coco-rtdetr-l": "https://github.com/ultralytics/assets/releases/download/v8.0.0/rtdetr-l.pt",
-    "coco-rtdetr-x": "https://github.com/ultralytics/assets/releases/download/v8.0.0/rtdetr-x.pt",
+MODEL_PRESETS: Dict[str, Dict[str, str]] = {
+    "coco-rtdetr-l": {
+        "family": "rtdetr",
+        "url": "https://github.com/ultralytics/assets/releases/download/v8.0.0/rtdetr-l.pt",
+    },
+    "coco-rtdetr-x": {
+        "family": "rtdetr",
+        "url": "https://github.com/ultralytics/assets/releases/download/v8.0.0/rtdetr-x.pt",
+    },
+    "coco-yolo11-l": {
+        "family": "yolo",
+        "model": "yolo11l.pt",
+    },
+    "coco-yolo11-x": {
+        "family": "yolo",
+        "model": "yolo11x.pt",
+    },
+    "coco-yolov8-x": {
+        "family": "yolo",
+        "model": "yolov8x.pt",
+    },
+    "coco-deformable-detr-l": {
+        "family": "yolo",
+        "model": "deformable-detr-l.pt",
+    },
+    "coco-deformable-detr-x": {
+        "family": "yolo",
+        "model": "deformable-detr-x.pt",
+    },
+    "coco-dino-l": {
+        "family": "yolo",
+        "model": "dino-l.pt",
+    },
+    "coco-dino-x": {
+        "family": "yolo",
+        "model": "dino-x.pt",
+    },
+    # NINO preset aliases currently map to DINO checkpoints.
+    "coco-nino-l": {
+        "family": "yolo",
+        "model": "dino-l.pt",
+    },
+    "coco-nino-x": {
+        "family": "yolo",
+        "model": "dino-x.pt",
+    },
 }
+MODEL_PRESET_KEYS_TEXT = " / ".join(sorted(MODEL_PRESETS.keys()))
+TRUSTED_WEIGHT_HOSTS = {"github.com"}
+SAFE_WEIGHT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+\.pt$")
 
 
 # YOLO format: (class_id, center_x, center_y, width, height), where x/y/w/h are normalized to [0, 1].
@@ -36,14 +84,14 @@ def _val_loss_total(row: dict) -> float:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train RT-DETR on TIFF + YOLO labels dataset.")
+    parser = argparse.ArgumentParser(description="Train object detection models on TIFF + YOLO labels dataset.")
     parser.add_argument("--dataset-root", type=Path, required=True, help="YOLO dataset root directory.")
     parser.add_argument("--class-names", nargs="+", required=True, help="Class names, e.g. --class-names person car")
     parser.add_argument(
         "--model",
         type=str,
         default="rtdetr-l.pt",
-        help="RT-DETR weight/model yaml, or preset key: coco-rtdetr-l / coco-rtdetr-x.",
+        help=f"Model weight/model yaml path, or preset key: {MODEL_PRESET_KEYS_TEXT}.",
     )
     parser.add_argument(
         "--weights-dir",
@@ -103,19 +151,59 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def resolve_model_path(model: str, weights_dir: Path) -> str:
-    if model not in COCO_PRETRAINED_WEIGHTS:
-        return model
+def _infer_model_family(model_ref: str) -> str:
+    lowered_model_ref = model_ref.lower()
+    if "rtdetr" in lowered_model_ref:
+        return "rtdetr"
+    if any(token in lowered_model_ref for token in ("deformable", "dino", "nino")):
+        return "yolo"
+    return "yolo"
 
-    url = COCO_PRETRAINED_WEIGHTS[model]
+
+def _safe_download_preset_weight(url: str, weights_dir: Path) -> Path:
+    parsed = urlparse(url)
+    if parsed.scheme != "https":
+        raise ValueError(f"Only https URLs are allowed for preset weights: {url}")
+    if not parsed.hostname or parsed.hostname.lower() not in TRUSTED_WEIGHT_HOSTS:
+        raise ValueError(f"Untrusted weight host in preset URL: {url}")
+    filename = Path(parsed.path).name
+    if not SAFE_WEIGHT_FILENAME.fullmatch(filename):
+        raise ValueError(f"Unsafe preset weight filename: {filename}")
+
     weights_dir.mkdir(parents=True, exist_ok=True)
-    dst = weights_dir / Path(url).name
+    root = weights_dir.resolve()
+    dst = (weights_dir / filename).resolve()
+    if root != dst.parent:
+        raise RuntimeError(f"Invalid preset weight destination path: {dst}")
+
     if not dst.exists():
         try:
-            urllib.request.urlretrieve(url, dst)
+            with urllib.request.urlopen(url, timeout=120) as response:
+                final_url = response.geturl()
+                final_parsed = urlparse(final_url)
+                if not final_parsed.hostname or final_parsed.hostname.lower() not in TRUSTED_WEIGHT_HOSTS:
+                    raise RuntimeError(f"Preset weight redirected to untrusted host: {final_url}")
+                tmp_dst = dst.with_suffix(dst.suffix + ".tmp")
+                with tmp_dst.open("wb") as f:
+                    shutil.copyfileobj(response, f)
+                tmp_dst.replace(dst)
         except URLError as exc:
-            raise RuntimeError(f"Failed to download preset model '{model}' from {url}: {exc}") from exc
-    return str(dst)
+            raise RuntimeError(f"Failed to download preset model from {url}: {exc}") from exc
+        except OSError as exc:
+            raise RuntimeError(f"Failed to save preset model to '{dst}': {exc}") from exc
+    return dst
+
+
+def resolve_model_path(model: str, weights_dir: Path) -> Tuple[str, str]:
+    if model not in MODEL_PRESETS:
+        return model, _infer_model_family(model)
+
+    preset = MODEL_PRESETS[model]
+    family = preset["family"]
+    if "url" in preset:
+        dst = _safe_download_preset_weight(preset["url"], weights_dir)
+        return str(dst), family
+    return preset["model"], family
 
 
 def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
@@ -719,7 +807,7 @@ def export_tensorboard_and_best(run_dir: Path) -> None:
     )
 
 
-def _resolve_run_dir(train_result, model: RTDETR, default_run_dir: Path) -> Path:
+def _resolve_run_dir(train_result, model, default_run_dir: Path) -> Path:
     save_dir = getattr(train_result, "save_dir", None)
     if save_dir is None:
         trainer = getattr(model, "trainer", None)
@@ -756,9 +844,8 @@ def main() -> None:
         aug_probs=aug_probs,
     )
     data_yaml = write_data_yaml(prepared_root, args.class_names)
-    model_path = resolve_model_path(args.model, args.weights_dir)
-
-    model = RTDETR(model_path)
+    model_path, model_family = resolve_model_path(args.model, args.weights_dir)
+    model = RTDETR(model_path) if model_family == "rtdetr" else YOLO(model_path)
     default_run_dir = Path(args.project) / args.name
     tb_writer = None
 

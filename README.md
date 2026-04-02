@@ -1,6 +1,6 @@
 # local_train_tool
 
-基于 RT-DETR 的目标检测训练流水线（支持 6-bit 数值范围的 `.tif` 图像 + YOLO 单行 `.txt` 标签）。
+通用目标检测训练流水线（支持 6-bit 数值范围的 `.tif` 图像 + YOLO 单行 `.txt` 标签）。
 
 ## 功能
 
@@ -24,10 +24,19 @@
   - 随机高斯模糊
   - 轻度模糊+噪声联合退化
 - 自动执行 uint16 TIFF 增强兼容性检查（启动训练前）
-- 使用 `ultralytics` 的 RT-DETR 训练
-- 支持公开 COCO 预训练权重快捷选项（会自动下载）：
+- 使用 `ultralytics` 的通用检测训练接口（RT-DETR / YOLO）
+- 支持公开 COCO 预训练权重快捷选项：
   - `coco-rtdetr-l`（RT-DETR-L）
   - `coco-rtdetr-x`（RT-DETR-X）
+  - `coco-yolo11-l`（YOLO11-L）
+  - `coco-yolo11-x`（YOLO11-X）
+  - `coco-yolov8-x`（YOLOv8-X）
+  - `coco-deformable-detr-l`（Deformable DETR-L）
+  - `coco-deformable-detr-x`（Deformable DETR-X）
+  - `coco-dino-l`（DINO-L）
+  - `coco-dino-x`（DINO-X）
+  - `coco-nino-l`（NINO-L，当前映射为 DINO-L）
+  - `coco-nino-x`（NINO-X，当前映射为 DINO-X）
 - 训练期间写入 TensorBoard（损失曲线）
 - 训练期间按 `val/box_loss + val/cls_loss + val/dfl_loss` 选出并保存最优权重：
   - `best_val_loss.pt`
@@ -62,10 +71,11 @@ python train_rtdetr.py \
 ```
 
 说明：
-- 也可以继续用本地模型路径或 `rtdetr-l.pt` / `rtdetr-x.pt`：
+- 可使用本地模型路径或官方权重名（例如：`rtdetr-l.pt`、`rtdetr-x.pt`、`yolo11x.pt`、`yolov8x.pt`）：
   - `--model /path/to/your_model.pt`
   - `--model rtdetr-l.pt`
-- 当 `--model` 取 `coco-rtdetr-l` 或 `coco-rtdetr-x` 时，脚本会从公开地址下载权重到 `weights/`（可用 `--weights-dir` 修改）。
+- 当 `--model` 取 `coco-rtdetr-l` 或 `coco-rtdetr-x` 时，脚本会从公开地址下载权重到 `weights/`（可用 `--weights-dir` 修改）；下载仅允许 `https://github.com`，并会校验目标文件名及落盘路径安全性。
+- 当 `--model` 取 `coco-yolo11-l` / `coco-yolo11-x` / `coco-yolov8-x` / `coco-deformable-detr-l` / `coco-deformable-detr-x` / `coco-dino-l` / `coco-dino-x` / `coco-nino-l` / `coco-nino-x` 时，直接使用 Ultralytics 内置模型名加载对应 COCO 预训练权重。
 - 数据预处理目录默认为 `<dataset-root>_prepared`：
   - 若该目录已存在，默认直接复用；
   - 可使用 `--force-rebuild-prepared` 强制重建；
