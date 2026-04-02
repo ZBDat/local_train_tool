@@ -9,14 +9,20 @@
   - `labels/train`, `labels/val`
 - 将 TIFF 图像转换为 **float32 单通道 TIFF**（不使用 8-bit PNG；当像素范围为 0~63 时按 6-bit 线性归一化）
 - 训练前对训练集支持离线数据增强（可配置增强副本数）：
+  - Mosaic（多图拼接小目标增强）
   - random crop（裁剪后缩放回原尺寸）
   - random rotation（90/180/270）
   - flip（水平/垂直）
+  - 轻度平移 + 缩放仿射
+  - 随机局部遮挡（Cutout）
   - 随机对比度变化
   - 随机亮度变化
+  - CLAHE-like 局部对比度增强
   - 随机 gamma 变化
+  - 随机直方图扰动（分位拉伸+强度扰动）
   - 随机高斯噪声
   - 随机高斯模糊
+  - 轻度模糊+噪声联合退化
 - 自动执行 uint16 TIFF 增强兼容性检查（启动训练前）
 - 使用 `ultralytics` 的 RT-DETR 训练
 - 支持公开 COCO 预训练权重快捷选项（会自动下载）：
