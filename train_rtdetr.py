@@ -54,6 +54,7 @@ MODEL_PRESETS: Dict[str, Dict[str, str]] = {
         "family": "yolo",
         "model": "dino-x.pt",
     },
+    # NINO preset aliases currently map to DINO checkpoints.
     "coco-nino-l": {
         "family": "yolo",
         "model": "dino-l.pt",
@@ -151,10 +152,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def _infer_model_family(model_ref: str) -> str:
-    lowered = model_ref.lower()
-    if "rtdetr" in lowered:
+    lowered_model_ref = model_ref.lower()
+    if "rtdetr" in lowered_model_ref:
         return "rtdetr"
-    if any(token in lowered for token in ("deformable", "dino", "nino")):
+    if any(token in lowered_model_ref for token in ("deformable", "dino", "nino")):
         return "yolo"
     return "yolo"
 
