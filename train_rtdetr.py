@@ -252,12 +252,12 @@ def _random_brightness(img: np.ndarray, rng: random.Random) -> np.ndarray:
 
 def _random_gamma(img: np.ndarray, rng: random.Random) -> np.ndarray:
     gamma = rng.uniform(0.7, 1.5)
-    return _clip01(np.power(np.clip(img, 0.0, 1.0), gamma))
+    return _clip01(np.power(img, gamma))
 
 
-def _random_gaussian_noise(img: np.ndarray, rng: random.Random) -> np.ndarray:
+def _random_gaussian_noise(img: np.ndarray, rng: random.Random, np_rng: np.random.Generator) -> np.ndarray:
     sigma = rng.uniform(0.0, 0.03)
-    noise = np.random.default_rng(rng.randint(0, 2**31 - 1)).normal(0.0, sigma, size=img.shape)
+    noise = np_rng.normal(0.0, sigma, size=img.shape)
     return _clip01(img + noise)
 
 
@@ -268,7 +268,7 @@ def _random_blur(img: np.ndarray, rng: random.Random) -> np.ndarray:
 
 
 def _apply_random_augmentations(
-    img_f32: np.ndarray, labels: Sequence[YoloLabel], rng: random.Random
+    img_f32: np.ndarray, labels: Sequence[YoloLabel], rng: random.Random, np_rng: np.random.Generator
 ) -> Tuple[np.ndarray, List[YoloLabel]]:
     img = img_f32.copy()
     aug_labels = list(labels)
@@ -287,7 +287,7 @@ def _apply_random_augmentations(
     if rng.random() < 0.5:
         img = _random_gamma(img, rng)
     if rng.random() < 0.4:
-        img = _random_gaussian_noise(img, rng)
+        img = _random_gaussian_noise(img, rng, np_rng)
     if rng.random() < 0.4:
         img = _random_blur(img, rng)
 
@@ -296,28 +296,34 @@ def _apply_random_augmentations(
 
 def _check_uint16_augmentation_compatibility(seed: int = 42) -> None:
     rng = random.Random(seed)
-    sample = (np.linspace(0, 65535, 128 * 128).reshape(128, 128)).astype(np.uint16)
+    np_rng = np.random.default_rng(seed)
+    sample = np.linspace(0, 65535, 128 * 128).reshape(128, 128).astype(np.uint16)
     base_img = _convert_to_float32_single_channel(sample)
     labels: List[YoloLabel] = [(0, 0.5, 0.5, 0.4, 0.4)]
 
     checks = [
-        lambda: _random_crop_and_resize(base_img, labels, rng),
-        lambda: _random_rotate_90(base_img, labels, rng),
-        lambda: _random_flip(base_img, labels, rng),
-        lambda: (_random_contrast(base_img, rng), labels),
-        lambda: (_random_brightness(base_img, rng), labels),
-        lambda: (_random_gamma(base_img, rng), labels),
-        lambda: (_random_gaussian_noise(base_img, rng), labels),
-        lambda: (_random_blur(base_img, rng), labels),
-        lambda: _apply_random_augmentations(base_img, labels, rng),
+        ("random_crop", lambda: _random_crop_and_resize(base_img, labels, rng)),
+        ("random_rotation", lambda: _random_rotate_90(base_img, labels, rng)),
+        ("flip", lambda: _random_flip(base_img, labels, rng)),
+        ("random_contrast", lambda: (_random_contrast(base_img, rng), labels)),
+        ("random_brightness", lambda: (_random_brightness(base_img, rng), labels)),
+        ("random_gamma", lambda: (_random_gamma(base_img, rng), labels)),
+        ("gaussian_noise", lambda: (_random_gaussian_noise(base_img, rng, np_rng), labels)),
+        ("gaussian_blur", lambda: (_random_blur(base_img, rng), labels)),
+        ("combined_pipeline", lambda: _apply_random_augmentations(base_img, labels, rng, np_rng)),
     ]
-    for fn in checks:
+    for aug_name, fn in checks:
         out_img, out_labels = fn()
         if out_img.ndim != 2 or not np.isfinite(out_img).all():
-            raise RuntimeError("uint16 TIFF augmentation compatibility check failed: invalid image output.")
+            raise RuntimeError(
+                f"uint16 TIFF augmentation compatibility check failed in '{aug_name}': invalid image output."
+            )
         for _, x, y, w, h in out_labels:
-            if min(x, y, w, h) < 0:
-                raise RuntimeError("uint16 TIFF augmentation compatibility check failed: invalid bbox output.")
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0 and w > 0.0 and h > 0.0 and w <= 1.0 and h <= 1.0):
+                raise RuntimeError(
+                    f"uint16 TIFF augmentation compatibility check failed in '{aug_name}': "
+                    f"invalid bbox (x={x}, y={y}, w={w}, h={h})."
+                )
 
 
 def convert_tifs_to_float32(
@@ -343,6 +349,7 @@ def convert_tifs_to_float32(
     shutil.copytree(dataset_root, prepared_root)
 
     rng = random.Random(augment_seed)
+    np_rng = np.random.default_rng(augment_seed)
     for split in ("train", "val"):
         image_dir = prepared_root / "images" / split
         label_dir = prepared_root / "labels" / split
@@ -357,7 +364,7 @@ def convert_tifs_to_float32(
             if split == "train" and augment_copies > 0:
                 base_labels = _read_yolo_labels(label_dir / f"{tif_path.stem}.txt")
                 for idx in range(augment_copies):
-                    aug_img, aug_labels = _apply_random_augmentations(arr_f32, base_labels, rng)
+                    aug_img, aug_labels = _apply_random_augmentations(arr_f32, base_labels, rng, np_rng)
                     aug_stem = f"{save_path.stem}_aug{idx + 1}"
                     Image.fromarray(aug_img, mode="F").save(image_dir / f"{aug_stem}.tif")
                     _write_yolo_labels(label_dir / f"{aug_stem}.txt", aug_labels)
