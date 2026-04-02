@@ -49,6 +49,13 @@ python train_rtdetr.py \
   --imgsz 640 \
   --augment-copies 1 \
   --augment-seed 42 \
+  --augment-mosaic-prob 0.35 \
+  --augment-translate-scale-prob 0.6 \
+  --augment-cutout-prob 0.45 \
+  --augment-clahe-prob 0.45 \
+  --augment-gamma-prob 0.5 \
+  --augment-hist-perturb-prob 0.5 \
+  --augment-blur-noise-combo-prob 0.35 \
   --model coco-rtdetr-l \
   --project runs/detect \
   --name rtdetr_train
@@ -66,6 +73,14 @@ python train_rtdetr.py \
 - 增强参数：
   - `--augment-copies`：每张训练图像生成多少份离线增强样本（默认 0，即不额外生成）。
   - `--augment-seed`：离线增强随机种子（默认 42）。
+  - 方案2（Mosaic）：`--augment-mosaic-prob`（默认 `0.35`）
+  - 方案3（平移+缩放仿射）：`--augment-translate-scale-prob`（默认 `0.6`）
+  - 方案4（Cutout）：`--augment-cutout-prob`（默认 `0.45`）
+  - 方案5（CLAHE-like）：`--augment-clahe-prob`（默认 `0.45`）
+  - 方案6（模糊+噪声联合）：`--augment-blur-noise-combo-prob`（默认 `0.35`）
+  - 方案7（Gamma 与直方图扰动）：
+    - `--augment-gamma-prob`（默认 `0.5`）
+    - `--augment-hist-perturb-prob`（默认 `0.5`）
 
 ## TensorBoard 监控
 

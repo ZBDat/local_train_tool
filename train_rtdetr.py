@@ -7,7 +7,7 @@ import shutil
 import urllib.request
 from urllib.error import URLError
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -21,6 +21,7 @@ COCO_PRETRAINED_WEIGHTS = {
 }
 
 
+# YOLO format: (class_id, center_x, center_y, width, height), where x/y/w/h are normalized to [0, 1].
 YoloLabel = Tuple[int, float, float, float, float]
 MIN_CUTOUT_VISIBLE_RATIO = 0.35
 UINT16_CHECK_IMAGE_SIZE = 128
@@ -62,6 +63,33 @@ def parse_args() -> argparse.Namespace:
         help="Number of offline augmented copies to generate per train image before training.",
     )
     parser.add_argument("--augment-seed", type=int, default=42, help="Random seed for offline data augmentation.")
+    parser.add_argument("--augment-mosaic-prob", type=float, default=0.35, help="Probability of mosaic augmentation.")
+    parser.add_argument(
+        "--augment-translate-scale-prob",
+        type=float,
+        default=0.6,
+        help="Probability of translate+scale affine augmentation.",
+    )
+    parser.add_argument("--augment-cutout-prob", type=float, default=0.45, help="Probability of cutout augmentation.")
+    parser.add_argument(
+        "--augment-clahe-prob",
+        type=float,
+        default=0.45,
+        help="Probability of CLAHE-like local contrast augmentation.",
+    )
+    parser.add_argument("--augment-gamma-prob", type=float, default=0.5, help="Probability of gamma augmentation.")
+    parser.add_argument(
+        "--augment-hist-perturb-prob",
+        type=float,
+        default=0.5,
+        help="Probability of histogram perturbation augmentation.",
+    )
+    parser.add_argument(
+        "--augment-blur-noise-combo-prob",
+        type=float,
+        default=0.35,
+        help="Probability of blur+noise combo augmentation.",
+    )
     parser.add_argument(
         "--reuse-prepared",
         action="store_true",
@@ -351,7 +379,7 @@ def _random_cutout(
 
 
 def _random_clahe_like(img: np.ndarray, rng: random.Random) -> np.ndarray:
-    # CLAHE is histogram/LUT-based; uint8 binning keeps implementation dependency-free and stable.
+    # CLAHE is histogram/LUT-based; uint8 binning keeps the implementation dependency-free and stable.
     u8 = np.clip(np.round(img * 255.0), 0, 255).astype(np.uint8)
     h, w = u8.shape
     tiles_x = rng.randint(6, 10)
@@ -458,11 +486,13 @@ def _apply_random_augmentations(
     rng: random.Random,
     np_rng: np.random.Generator,
     sample_pool: Sequence[Tuple[np.ndarray, Sequence[YoloLabel]]] | None = None,
+    aug_probs: Dict[str, float] | None = None,
 ) -> Tuple[np.ndarray, List[YoloLabel]]:
     img = img_f32.copy()
     aug_labels = list(labels)
+    probs = aug_probs or {}
 
-    if sample_pool and rng.random() < 0.35:
+    if sample_pool and rng.random() < probs.get("mosaic", 0.35):
         img, aug_labels = _random_mosaic(img, aug_labels, sample_pool, rng)
     if rng.random() < 0.6:
         img, aug_labels = _random_crop_and_resize(img, aug_labels, rng)
@@ -470,32 +500,32 @@ def _apply_random_augmentations(
         img, aug_labels = _random_rotate_90(img, aug_labels, rng)
     if rng.random() < 0.5:
         img, aug_labels = _random_flip(img, aug_labels, rng)
-    if rng.random() < 0.6:
+    if rng.random() < probs.get("translate_scale", 0.6):
         img, aug_labels = _random_translate_scale(img, aug_labels, rng)
-    if rng.random() < 0.45:
+    if rng.random() < probs.get("cutout", 0.45):
         img, aug_labels = _random_cutout(img, aug_labels, rng)
 
     if rng.random() < 0.7:
         img = _random_contrast(img, rng)
     if rng.random() < 0.7:
         img = _random_brightness(img, rng)
-    if rng.random() < 0.45:
+    if rng.random() < probs.get("clahe", 0.45):
         img = _random_clahe_like(img, rng)
-    if rng.random() < 0.5:
+    if rng.random() < probs.get("gamma", 0.5):
         img = _random_gamma(img, rng)
-    if rng.random() < 0.5:
+    if rng.random() < probs.get("hist_perturb", 0.5):
         img = _random_histogram_perturb(img, rng)
     if rng.random() < 0.4:
         img = _random_gaussian_noise(img, rng, np_rng)
     if rng.random() < 0.4:
         img = _random_blur(img, rng)
-    if rng.random() < 0.35:
+    if rng.random() < probs.get("blur_noise_combo", 0.35):
         img = _random_blur_noise_combo(img, rng, np_rng)
 
     return _clip01(img), aug_labels
 
 
-def _check_uint16_augmentation_compatibility(seed: int = 42) -> None:
+def _check_uint16_augmentation_compatibility(seed: int = 42, aug_probs: Dict[str, float] | None = None) -> None:
     rng = random.Random(seed)
     np_rng = np.random.default_rng(seed)
     sample = np.linspace(0, 65535, UINT16_CHECK_IMAGE_SIZE * UINT16_CHECK_IMAGE_SIZE).reshape(
@@ -520,7 +550,10 @@ def _check_uint16_augmentation_compatibility(seed: int = 42) -> None:
         ("gaussian_noise", lambda: (_random_gaussian_noise(base_img, rng, np_rng), labels)),
         ("gaussian_blur", lambda: (_random_blur(base_img, rng), labels)),
         ("blur_noise_combo", lambda: (_random_blur_noise_combo(base_img, rng, np_rng), labels)),
-        ("combined_pipeline", lambda: _apply_random_augmentations(base_img, labels, rng, np_rng, sample_pool)),
+        (
+            "combined_pipeline",
+            lambda: _apply_random_augmentations(base_img, labels, rng, np_rng, sample_pool, aug_probs=aug_probs),
+        ),
     ]
     for aug_name, fn in checks:
         out_img, out_labels = fn()
@@ -542,6 +575,7 @@ def convert_tifs_to_float32(
     force_rebuild_prepared: bool = False,
     augment_copies: int = 0,
     augment_seed: int = 42,
+    aug_probs: Dict[str, float] | None = None,
 ) -> Path:
     prepared_root = dataset_root.parent / f"{dataset_root.name}_prepared"
     if reuse_prepared and force_rebuild_prepared:
@@ -575,6 +609,7 @@ def convert_tifs_to_float32(
             if tif_path != save_path:
                 tif_path.unlink()
         if split == "train" and augment_copies > 0:
+            # All train images are normalized and rewritten to .tif above, so we augment from .tif only.
             train_base_paths = sorted(image_dir.glob("*.tif"))
             sample_pool: List[Tuple[np.ndarray, Sequence[YoloLabel]]] = []
             for base_path in train_base_paths:
@@ -592,6 +627,7 @@ def convert_tifs_to_float32(
                             rng,
                             np_rng,
                             sample_pool=sample_pool,
+                            aug_probs=aug_probs,
                         )
                         aug_stem = f"{base_path.stem}_aug{idx + 1}"
                         Image.fromarray(aug_img, mode="F").save(image_dir / f"{aug_stem}.tif")
@@ -695,8 +731,20 @@ def main() -> None:
     args = parse_args()
     if args.augment_copies < 0:
         raise ValueError("--augment-copies must be >= 0")
+    aug_probs = {
+        "mosaic": args.augment_mosaic_prob,
+        "translate_scale": args.augment_translate_scale_prob,
+        "cutout": args.augment_cutout_prob,
+        "clahe": args.augment_clahe_prob,
+        "gamma": args.augment_gamma_prob,
+        "hist_perturb": args.augment_hist_perturb_prob,
+        "blur_noise_combo": args.augment_blur_noise_combo_prob,
+    }
+    for key, val in aug_probs.items():
+        if not (0.0 <= float(val) <= 1.0):
+            raise ValueError(f"Augmentation probability '{key}' must be in [0, 1], got {val}.")
 
-    _check_uint16_augmentation_compatibility(seed=args.augment_seed)
+    _check_uint16_augmentation_compatibility(seed=args.augment_seed, aug_probs=aug_probs)
     print("uint16 TIFF augmentation compatibility check passed.")
 
     prepared_root = convert_tifs_to_float32(
@@ -705,6 +753,7 @@ def main() -> None:
         force_rebuild_prepared=args.force_rebuild_prepared,
         augment_copies=args.augment_copies,
         augment_seed=args.augment_seed,
+        aug_probs=aug_probs,
     )
     data_yaml = write_data_yaml(prepared_root, args.class_names)
     model_path = resolve_model_path(args.model, args.weights_dir)
