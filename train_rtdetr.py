@@ -65,11 +65,7 @@ def parse_args() -> argparse.Namespace:
         "--model",
         type=str,
         default="rtdetr-l.pt",
-        help=(
-            "Model weight/model yaml path, or preset key: "
-            + " / ".join(sorted(MODEL_PRESETS.keys()))
-            + "."
-        ),
+        help=f"Model weight/model yaml path, or preset key: {' / '.join(sorted(MODEL_PRESETS.keys()))}.",
     )
     parser.add_argument(
         "--weights-dir",
@@ -154,7 +150,7 @@ def _safe_download_preset_weight(url: str, weights_dir: Path) -> Path:
 
     if not dst.exists():
         try:
-            with urllib.request.urlopen(url, timeout=60) as response:
+            with urllib.request.urlopen(url, timeout=300) as response:
                 final_url = response.geturl()
                 final_parsed = urlparse(final_url)
                 if not final_parsed.hostname or final_parsed.hostname.lower() not in TRUSTED_WEIGHT_HOSTS:
@@ -164,7 +160,7 @@ def _safe_download_preset_weight(url: str, weights_dir: Path) -> Path:
                     shutil.copyfileobj(response, f)
                 tmp_dst.replace(dst)
         except URLError as exc:
-            raise RuntimeError(f"Failed to download preset model '{model}' from {url}: {exc}") from exc
+            raise RuntimeError(f"Failed to download preset model from {url}: {exc}") from exc
         except OSError as exc:
             raise RuntimeError(f"Failed to save preset model to '{dst}': {exc}") from exc
     return dst
