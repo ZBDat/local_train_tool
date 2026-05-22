@@ -74,7 +74,8 @@ python train_rtdetr.py \
 - 可使用本地模型路径或官方权重名（例如：`rtdetr-l.pt`、`rtdetr-x.pt`、`yolo11x.pt`、`yolov8x.pt`）：
   - `--model /path/to/your_model.pt`
   - `--model rtdetr-l.pt`
-- 当 `--model` 取 `coco-rtdetr-l` 或 `coco-rtdetr-x` 时，脚本会从公开地址下载权重到 `weights/`（可用 `--weights-dir` 修改）；下载仅允许 `https://github.com`，并会校验目标文件名及落盘路径安全性。
+- 当 `--model` 取 `coco-rtdetr-l` 或 `coco-rtdetr-x` 时，脚本会从公开地址下载权重到 `weights/`（可用 `--weights-dir` 修改）；下载仅允许 GitHub 相关可信域名（含重定向目标），并会校验目标文件名及落盘路径安全性。
+- 对于 URL 下载的 preset 权重，可通过 `--preset-sha256 <sha256>` 启用文件完整性校验（建议在生产训练时提供）。
 - 当 `--model` 取 `coco-yolo11-l` / `coco-yolo11-x` / `coco-yolov8-x` / `coco-deformable-detr-l` / `coco-deformable-detr-x` / `coco-dino-l` / `coco-dino-x` / `coco-nino-l` / `coco-nino-x` 时，直接使用 Ultralytics 内置模型名加载对应 COCO 预训练权重。
 - 数据预处理目录默认为 `<dataset-root>_prepared`：
   - 若该目录已存在，默认直接复用；
@@ -91,6 +92,10 @@ python train_rtdetr.py \
   - 方案7（Gamma 与直方图扰动）：
     - `--augment-gamma-prob`（默认 `0.5`）
     - `--augment-hist-perturb-prob`（默认 `0.5`）
+- 归一化策略（`--normalize-mode`）：
+  - `per_image`（默认）：按单图动态范围归一化。
+  - `fixed_6bit`：固定按 `63` 归一化。
+  - `fixed_uint16`：固定按 `65535` 归一化。
 
 ## TensorBoard 监控
 

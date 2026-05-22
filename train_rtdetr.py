@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 import argparse
 import csv
+import hashlib
 import json
+import numbers
 import random
 import re
 import shutil
 import urllib.request
+import warnings
+from collections import OrderedDict
 from urllib.error import URLError
 from urllib.parse import urlparse
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -65,8 +69,16 @@ MODEL_PRESETS: Dict[str, Dict[str, str]] = {
     },
 }
 MODEL_PRESET_KEYS_TEXT = " / ".join(sorted(MODEL_PRESETS.keys()))
-TRUSTED_WEIGHT_HOSTS = {"github.com"}
+TRUSTED_WEIGHT_HOSTS = {
+    "github.com",
+    "objects.githubusercontent.com",
+    "github-releases.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+}
 SAFE_WEIGHT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+\.pt$")
+SAFE_SHA256_HEX = re.compile(r"^[A-Fa-f0-9]{64}$")
+NORMALIZE_MODES = ("per_image", "fixed_6bit", "fixed_uint16")
+MAX_AUG_IMAGE_CACHE = 16
 
 
 # YOLO format: (class_id, center_x, center_y, width, height), where x/y/w/h are normalized to [0, 1].
@@ -98,6 +110,19 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("weights"),
         help="Directory for downloaded preset weights.",
+    )
+    parser.add_argument(
+        "--preset-sha256",
+        type=str,
+        default="",
+        help="Optional expected SHA256 for downloaded URL-based preset weights.",
+    )
+    parser.add_argument(
+        "--normalize-mode",
+        type=str,
+        choices=NORMALIZE_MODES,
+        default="per_image",
+        help="Image normalization mode: per_image / fixed_6bit / fixed_uint16.",
     )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch", type=int, default=16)
@@ -160,7 +185,31 @@ def _infer_model_family(model_ref: str) -> str:
     return "yolo"
 
 
-def _safe_download_preset_weight(url: str, weights_dir: Path) -> Path:
+def _sha256_of_file(file_path: Path) -> str:
+    digest = hashlib.sha256()
+    with file_path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verify_expected_sha256(file_path: Path, expected_sha256: str) -> None:
+    expected = expected_sha256.strip().lower()
+    if not expected:
+        return
+    if not SAFE_SHA256_HEX.fullmatch(expected):
+        raise ValueError(f"Invalid SHA256 format: '{expected_sha256}'")
+    actual = _sha256_of_file(file_path)
+    if actual != expected:
+        raise RuntimeError(
+            f"SHA256 mismatch for '{file_path.name}': expected {expected}, got {actual}."
+        )
+
+
+def _safe_download_preset_weight(url: str, weights_dir: Path, expected_sha256: str = "") -> Path:
     parsed = urlparse(url)
     if parsed.scheme != "https":
         raise ValueError(f"Only https URLs are allowed for preset weights: {url}")
@@ -176,38 +225,62 @@ def _safe_download_preset_weight(url: str, weights_dir: Path) -> Path:
     if root != dst.parent:
         raise RuntimeError(f"Invalid preset weight destination path: {dst}")
 
-    if not dst.exists():
-        try:
-            with urllib.request.urlopen(url, timeout=120) as response:
-                final_url = response.geturl()
-                final_parsed = urlparse(final_url)
-                if not final_parsed.hostname or final_parsed.hostname.lower() not in TRUSTED_WEIGHT_HOSTS:
-                    raise RuntimeError(f"Preset weight redirected to untrusted host: {final_url}")
-                tmp_dst = dst.with_suffix(dst.suffix + ".tmp")
-                with tmp_dst.open("wb") as f:
-                    shutil.copyfileobj(response, f)
-                tmp_dst.replace(dst)
-        except URLError as exc:
-            raise RuntimeError(f"Failed to download preset model from {url}: {exc}") from exc
-        except OSError as exc:
-            raise RuntimeError(f"Failed to save preset model to '{dst}': {exc}") from exc
+    if dst.exists():
+        _verify_expected_sha256(dst, expected_sha256)
+        return dst
+
+    tmp_dst = dst.with_suffix(dst.suffix + ".tmp")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as response:
+            final_url = response.geturl()
+            final_parsed = urlparse(final_url)
+            if not final_parsed.hostname or final_parsed.hostname.lower() not in TRUSTED_WEIGHT_HOSTS:
+                raise RuntimeError(f"Preset weight redirected to untrusted host: {final_url}")
+
+            expected = expected_sha256.strip().lower()
+            if expected and not SAFE_SHA256_HEX.fullmatch(expected):
+                raise ValueError(f"Invalid SHA256 format: '{expected_sha256}'")
+            hasher = hashlib.sha256()
+            with tmp_dst.open("wb") as f:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    hasher.update(chunk)
+
+            if expected and hasher.hexdigest() != expected:
+                try:
+                    tmp_dst.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise RuntimeError(
+                    f"SHA256 mismatch for downloaded '{filename}': expected {expected}, got {hasher.hexdigest()}."
+                )
+            tmp_dst.replace(dst)
+    except URLError as exc:
+        raise RuntimeError(f"Failed to download preset model from {url}: {exc}") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Failed to save preset model to '{dst}': {exc}") from exc
+
+    _verify_expected_sha256(dst, expected_sha256)
     return dst
 
 
-def resolve_model_path(model: str, weights_dir: Path) -> Tuple[str, str]:
+def resolve_model_path(model: str, weights_dir: Path, preset_sha256: str = "") -> Tuple[str, str]:
     if model not in MODEL_PRESETS:
         return model, _infer_model_family(model)
 
     preset = MODEL_PRESETS[model]
     family = preset["family"]
     if "url" in preset:
-        dst = _safe_download_preset_weight(preset["url"], weights_dir)
+        expected_sha256 = preset_sha256.strip() or preset.get("sha256", "")
+        dst = _safe_download_preset_weight(preset["url"], weights_dir, expected_sha256=expected_sha256)
         return str(dst), family
     return preset["model"], family
 
 
-def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
-    # 6-bit TIFF data is expected in [0, 63], so normalize by 63 in that case.
+def _convert_to_float32_single_channel(arr: np.ndarray, normalize_mode: str = "per_image") -> np.ndarray:
     arr = np.asarray(arr)
     if arr.ndim == 3:
         arr = arr.mean(axis=2)
@@ -217,6 +290,13 @@ def _convert_to_float32_single_channel(arr: np.ndarray) -> np.ndarray:
             arr = arr.mean(axis=2)
     if arr.ndim != 2:
         raise TypeError(f"Unsupported array shape: {arr.shape}")
+    if normalize_mode not in NORMALIZE_MODES:
+        raise ValueError(f"Unsupported normalize mode: {normalize_mode}")
+
+    if normalize_mode == "fixed_6bit":
+        return _clip01(arr.astype(np.float32) / 63.0)
+    if normalize_mode == "fixed_uint16":
+        return _clip01(arr.astype(np.float32) / 65535.0)
 
     if np.issubdtype(arr.dtype, np.integer):
         max_val = int(arr.max()) if arr.size else 0
@@ -242,23 +322,63 @@ def _clip01(arr: np.ndarray) -> np.ndarray:
     return np.clip(arr, 0.0, 1.0).astype(np.float32)
 
 
+def _sanitize_yolo_box(cls: int, x: float, y: float, w: float, h: float) -> YoloLabel | None:
+    vals = (x, y, w, h)
+    if not all(np.isfinite(v) for v in vals):
+        return None
+    x = float(np.clip(x, 0.0, 1.0))
+    y = float(np.clip(y, 0.0, 1.0))
+    w = float(np.clip(w, 0.0, 1.0))
+    h = float(np.clip(h, 0.0, 1.0))
+    if w <= 0.0 or h <= 0.0:
+        return None
+    return cls, x, y, w, h
+
+
 def _read_yolo_labels(label_path: Path) -> List[YoloLabel]:
     if not label_path.exists():
         return []
     labels: List[YoloLabel] = []
-    for raw in label_path.read_text(encoding="utf-8").splitlines():
+    for line_no, raw in enumerate(label_path.read_text(encoding="utf-8").splitlines(), start=1):
         line = raw.strip()
         if not line:
             continue
         parts = line.split()
         if len(parts) != 5:
+            warnings.warn(
+                f"Skipping malformed YOLO label line at {label_path}:{line_no} (expected 5 fields).",
+                RuntimeWarning,
+            )
             continue
         try:
             cls = int(parts[0])
-        except ValueError:
-            cls = int(float(parts[0]))
-        x, y, w, h = map(float, parts[1:])
-        labels.append((cls, x, y, w, h))
+        except (TypeError, ValueError):
+            try:
+                cls = int(float(parts[0]))
+            except (TypeError, ValueError):
+                warnings.warn(
+                    f"Skipping YOLO label line with invalid class id at {label_path}:{line_no}.",
+                    RuntimeWarning,
+                )
+                continue
+
+        try:
+            x, y, w, h = map(float, parts[1:])
+        except (TypeError, ValueError):
+            warnings.warn(
+                f"Skipping YOLO label line with invalid bbox values at {label_path}:{line_no}.",
+                RuntimeWarning,
+            )
+            continue
+
+        sanitized = _sanitize_yolo_box(cls, x, y, w, h)
+        if sanitized is None:
+            warnings.warn(
+                f"Skipping YOLO label line with non-positive or non-finite bbox at {label_path}:{line_no}.",
+                RuntimeWarning,
+            )
+            continue
+        labels.append(sanitized)
     return labels
 
 
@@ -518,10 +638,9 @@ def _random_blur_noise_combo(img: np.ndarray, rng: random.Random, np_rng: np.ran
     return _clip01(out + noise)
 
 
-def _random_mosaic(
+def _compose_mosaic_from_samples(
     current_img: np.ndarray,
-    current_labels: Sequence[YoloLabel],
-    sample_pool: Sequence[Tuple[np.ndarray, Sequence[YoloLabel]]],
+    chosen: Sequence[Tuple[np.ndarray, Sequence[YoloLabel]]],
     rng: random.Random,
 ) -> Tuple[np.ndarray, List[YoloLabel]]:
     h, w = current_img.shape
@@ -534,9 +653,6 @@ def _random_mosaic(
         (0, cut_y, cut_x, h - cut_y),
         (cut_x, cut_y, w - cut_x, h - cut_y),
     ]
-    chosen: List[Tuple[np.ndarray, Sequence[YoloLabel]]] = [(current_img, current_labels)]
-    for _ in range(3):
-        chosen.append(sample_pool[rng.randrange(len(sample_pool))])
 
     mosaic = np.zeros((h, w), dtype=np.float32)
     out_labels: List[YoloLabel] = []
@@ -568,20 +684,50 @@ def _random_mosaic(
     return _clip01(mosaic), out_labels
 
 
+def _random_mosaic(
+    current_img: np.ndarray,
+    current_labels: Sequence[YoloLabel],
+    sample_pool: Sequence[Tuple[np.ndarray, Sequence[YoloLabel]]],
+    rng: random.Random,
+) -> Tuple[np.ndarray, List[YoloLabel]]:
+    chosen: List[Tuple[np.ndarray, Sequence[YoloLabel]]] = [(current_img, current_labels)]
+    for _ in range(3):
+        chosen.append(sample_pool[rng.randrange(len(sample_pool))])
+    return _compose_mosaic_from_samples(current_img, chosen, rng)
+
+
+def _random_mosaic_with_sampler(
+    current_img: np.ndarray,
+    current_labels: Sequence[YoloLabel],
+    sample_count: int,
+    sample_getter: Callable[[int], Tuple[np.ndarray, Sequence[YoloLabel]]],
+    rng: random.Random,
+) -> Tuple[np.ndarray, List[YoloLabel]]:
+    chosen: List[Tuple[np.ndarray, Sequence[YoloLabel]]] = [(current_img, current_labels)]
+    for _ in range(3):
+        chosen.append(sample_getter(rng.randrange(sample_count)))
+    return _compose_mosaic_from_samples(current_img, chosen, rng)
+
+
 def _apply_random_augmentations(
     img_f32: np.ndarray,
     labels: Sequence[YoloLabel],
     rng: random.Random,
     np_rng: np.random.Generator,
     sample_pool: Sequence[Tuple[np.ndarray, Sequence[YoloLabel]]] | None = None,
+    sample_count: int = 0,
+    sample_getter: Callable[[int], Tuple[np.ndarray, Sequence[YoloLabel]]] | None = None,
     aug_probs: Dict[str, float] | None = None,
 ) -> Tuple[np.ndarray, List[YoloLabel]]:
     img = img_f32.copy()
     aug_labels = list(labels)
     probs = aug_probs or {}
 
-    if sample_pool and rng.random() < probs.get("mosaic", 0.35):
-        img, aug_labels = _random_mosaic(img, aug_labels, sample_pool, rng)
+    if rng.random() < probs.get("mosaic", 0.35):
+        if sample_pool:
+            img, aug_labels = _random_mosaic(img, aug_labels, sample_pool, rng)
+        elif sample_getter is not None and sample_count > 0:
+            img, aug_labels = _random_mosaic_with_sampler(img, aug_labels, sample_count, sample_getter, rng)
     if rng.random() < 0.6:
         img, aug_labels = _random_crop_and_resize(img, aug_labels, rng)
     if rng.random() < 0.6:
@@ -613,13 +759,17 @@ def _apply_random_augmentations(
     return _clip01(img), aug_labels
 
 
-def _check_uint16_augmentation_compatibility(seed: int = 42, aug_probs: Dict[str, float] | None = None) -> None:
+def _check_uint16_augmentation_compatibility(
+    seed: int = 42,
+    aug_probs: Dict[str, float] | None = None,
+    normalize_mode: str = "per_image",
+) -> None:
     rng = random.Random(seed)
     np_rng = np.random.default_rng(seed)
     sample = np.linspace(0, 65535, UINT16_CHECK_IMAGE_SIZE * UINT16_CHECK_IMAGE_SIZE).reshape(
         UINT16_CHECK_IMAGE_SIZE, UINT16_CHECK_IMAGE_SIZE
     ).astype(np.uint16)
-    base_img = _convert_to_float32_single_channel(sample)
+    base_img = _convert_to_float32_single_channel(sample, normalize_mode=normalize_mode)
     labels: List[YoloLabel] = [(0, 0.5, 0.5, 0.4, 0.4)]
 
     sample_pool = [(base_img, labels)]
@@ -663,6 +813,7 @@ def convert_tifs_to_float32(
     force_rebuild_prepared: bool = False,
     augment_copies: int = 0,
     augment_seed: int = 42,
+    normalize_mode: str = "per_image",
     aug_probs: Dict[str, float] | None = None,
 ) -> Path:
     prepared_root = dataset_root.parent / f"{dataset_root.name}_prepared"
@@ -691,7 +842,7 @@ def convert_tifs_to_float32(
         for tif_path in all_paths:
             with Image.open(tif_path) as img:
                 arr = np.array(img)
-            arr_f32 = _convert_to_float32_single_channel(arr)
+            arr_f32 = _convert_to_float32_single_channel(arr, normalize_mode=normalize_mode)
             save_path = tif_path.with_suffix(".tif")
             Image.fromarray(arr_f32, mode="F").save(save_path)
             if tif_path != save_path:
@@ -699,22 +850,39 @@ def convert_tifs_to_float32(
         if split == "train" and augment_copies > 0:
             # All train images are normalized and rewritten to .tif above, so we augment from .tif only.
             train_base_paths = sorted(image_dir.glob("*.tif"))
-            sample_pool: List[Tuple[np.ndarray, Sequence[YoloLabel]]] = []
-            for base_path in train_base_paths:
-                with Image.open(base_path) as img:
-                    base_arr = np.array(img, dtype=np.float32)
-                base_arr = _clip01(base_arr)
-                base_labels = _read_yolo_labels(label_dir / f"{base_path.stem}.txt")
-                sample_pool.append((base_arr, base_labels))
-            if sample_pool:
-                for base_path, (base_arr, base_labels) in zip(train_base_paths, sample_pool):
+            if train_base_paths:
+                sample_cache: OrderedDict[Path, Tuple[np.ndarray, List[YoloLabel]]] = OrderedDict()
+
+                def _load_train_sample(path: Path) -> Tuple[np.ndarray, List[YoloLabel]]:
+                    cached = sample_cache.get(path)
+                    if cached is not None:
+                        sample_cache.move_to_end(path)
+                        return cached
+                    with Image.open(path) as img:
+                        arr = np.array(img, dtype=np.float32)
+                    arr = _clip01(arr)
+                    labels = _read_yolo_labels(label_dir / f"{path.stem}.txt")
+                    sample = (arr, labels)
+                    sample_cache[path] = sample
+                    if len(sample_cache) > MAX_AUG_IMAGE_CACHE:
+                        sample_cache.popitem(last=False)
+                    return sample
+
+                sample_count = len(train_base_paths)
+
+                def _sample_getter(index: int) -> Tuple[np.ndarray, Sequence[YoloLabel]]:
+                    return _load_train_sample(train_base_paths[index])
+
+                for base_path in train_base_paths:
+                    base_arr, base_labels = _load_train_sample(base_path)
                     for idx in range(augment_copies):
                         aug_img, aug_labels = _apply_random_augmentations(
                             base_arr,
                             base_labels,
                             rng,
                             np_rng,
-                            sample_pool=sample_pool,
+                            sample_count=sample_count,
+                            sample_getter=_sample_getter,
                             aug_probs=aug_probs,
                         )
                         aug_stem = f"{base_path.stem}_aug{idx + 1}"
@@ -832,7 +1000,11 @@ def main() -> None:
         if not (0.0 <= float(val) <= 1.0):
             raise ValueError(f"Augmentation probability '{key}' must be in [0, 1], got {val}.")
 
-    _check_uint16_augmentation_compatibility(seed=args.augment_seed, aug_probs=aug_probs)
+    _check_uint16_augmentation_compatibility(
+        seed=args.augment_seed,
+        aug_probs=aug_probs,
+        normalize_mode=args.normalize_mode,
+    )
     print("uint16 TIFF augmentation compatibility check passed.")
 
     prepared_root = convert_tifs_to_float32(
@@ -841,10 +1013,15 @@ def main() -> None:
         force_rebuild_prepared=args.force_rebuild_prepared,
         augment_copies=args.augment_copies,
         augment_seed=args.augment_seed,
+        normalize_mode=args.normalize_mode,
         aug_probs=aug_probs,
     )
     data_yaml = write_data_yaml(prepared_root, args.class_names)
-    model_path, model_family = resolve_model_path(args.model, args.weights_dir)
+    model_path, model_family = resolve_model_path(
+        args.model,
+        args.weights_dir,
+        preset_sha256=args.preset_sha256,
+    )
     model = RTDETR(model_path) if model_family == "rtdetr" else YOLO(model_path)
     default_run_dir = Path(args.project) / args.name
     tb_writer = None
@@ -869,7 +1046,7 @@ def main() -> None:
         metrics = getattr(trainer, "metrics", {})
         epoch = int(getattr(trainer, "epoch", 0))
         for key, value in metrics.items():
-            if isinstance(value, (int, float)):
+            if isinstance(value, numbers.Real):
                 writer.add_scalar(str(key), float(value), epoch)
         val_loss = _val_loss_total(metrics)
         if np.isfinite(val_loss):
