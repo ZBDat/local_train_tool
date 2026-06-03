@@ -2,6 +2,7 @@
 import argparse
 import csv
 import hashlib
+import io
 import json
 import numbers
 import random
@@ -17,6 +18,7 @@ from typing import Callable, Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
 from PIL import Image, ImageFilter
+import torch
 from torch.utils.tensorboard import SummaryWriter
 from ultralytics import RTDETR, YOLO
 
@@ -24,11 +26,11 @@ from ultralytics import RTDETR, YOLO
 MODEL_PRESETS: Dict[str, Dict[str, str]] = {
     "coco-rtdetr-l": {
         "family": "rtdetr",
-        "url": "https://github.com/ultralytics/assets/releases/download/v8.0.0/rtdetr-l.pt",
+        "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/rtdetr-l.pt",
     },
     "coco-rtdetr-x": {
         "family": "rtdetr",
-        "url": "https://github.com/ultralytics/assets/releases/download/v8.0.0/rtdetr-x.pt",
+        "url": "https://github.com/ultralytics/assets/releases/download/v8.4.0/rtdetr-x.pt",
     },
     "coco-yolo11-l": {
         "family": "yolo",
@@ -173,6 +175,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force rebuild prepared dataset directory even if it already exists.",
     )
+    parser.add_argument(
+        "--raw-split-ratio",
+        type=float,
+        default=0.8,
+        help="Train split ratio when auto-converting flat raw layout (images + yolo_annotations).",
+    )
+    parser.add_argument(
+        "--raw-split-seed",
+        type=int,
+        default=42,
+        help="Random seed used for auto split when converting flat raw layout.",
+    )
     return parser.parse_args()
 
 
@@ -302,24 +316,53 @@ def _convert_to_float32_single_channel(arr: np.ndarray, normalize_mode: str = "p
         max_val = int(arr.max()) if arr.size else 0
         if max_val <= 0:
             return np.zeros_like(arr, dtype=np.float32)
+        arr_nonneg = np.clip(arr, 0, None).astype(np.float64, copy=False)
+        dtype_max = int(np.iinfo(arr.dtype).max)
         if max_val <= 63:
-            return arr.astype(np.float32) / 63.0
-        return arr.astype(np.float32) / float(max_val)
+            return _clip01((arr_nonneg / 63.0).astype(np.float32))
+        if dtype_max > 0:
+            return _clip01((arr_nonneg / float(dtype_max)).astype(np.float32))
+        return _clip01((arr_nonneg / float(max_val)).astype(np.float32))
+
     if np.issubdtype(arr.dtype, np.floating):
         finite = arr[np.isfinite(arr)]
         if finite.size == 0:
             return np.zeros_like(arr, dtype=np.float32)
         min_val = float(finite.min())
         max_val = float(finite.max())
-        if max_val <= min_val:
+        if max_val <= 0.0:
             return np.zeros_like(arr, dtype=np.float32)
-        scaled = (np.clip(arr, min_val, max_val) - min_val) / (max_val - min_val)
-        return scaled.astype(np.float32)
+        clipped = np.clip(arr, 0.0, None)
+        if max_val <= 1.0:
+            return _clip01(clipped)
+        if max_val <= 63.0:
+            return _clip01((clipped / 63.0).astype(np.float32))
+        if max_val <= 255.0:
+            return _clip01((clipped / 255.0).astype(np.float32))
+        if max_val <= 65535.0:
+            return _clip01((clipped / 65535.0).astype(np.float32))
+        return _clip01((clipped / max_val).astype(np.float32))
+
     raise TypeError(f"Unsupported array dtype: {arr.dtype}")
 
 
 def _clip01(arr: np.ndarray) -> np.ndarray:
     return np.clip(arr, 0.0, 1.0).astype(np.float32)
+
+
+def _read_tiff_array_lossless(tif_path: Path) -> np.ndarray:
+    """Read TIFF from bytes and preserve source bit-depth as much as possible."""
+    raw = tif_path.read_bytes()
+    with Image.open(io.BytesIO(raw)) as img:
+        mode = img.mode
+        arr = np.asarray(img)
+
+    if arr.dtype == np.uint8 and mode.startswith("I;16"):
+        raise RuntimeError(
+            f"Failed to decode 16-bit TIFF without downcast at '{tif_path}'. "
+            "Please check Pillow/TIFF codec support in current environment."
+        )
+    return np.array(arr, copy=True)
 
 
 def _sanitize_yolo_box(cls: int, x: float, y: float, w: float, h: float) -> YoloLabel | None:
@@ -545,8 +588,11 @@ def _random_gaussian_noise(img: np.ndarray, rng: random.Random, np_rng: np.rando
 
 def _random_blur(img: np.ndarray, rng: random.Random) -> np.ndarray:
     radius = rng.uniform(0.0, 1.2)
-    blurred = Image.fromarray(img, mode="F").filter(ImageFilter.GaussianBlur(radius=radius))
-    return _clip01(np.array(blurred, dtype=np.float32))
+    # Some Pillow builds do not support GaussianBlur on mode "F" reliably.
+    # Use uint8 path for compatibility, then map back to float32 [0, 1].
+    u8 = np.clip(np.round(img * 255.0), 0, 255).astype(np.uint8)
+    blurred = Image.fromarray(u8, mode="L").filter(ImageFilter.GaussianBlur(radius=radius))
+    return _clip01(np.array(blurred, dtype=np.float32) / 255.0)
 
 
 def _random_cutout(
@@ -807,6 +853,124 @@ def _check_uint16_augmentation_compatibility(
                 )
 
 
+def _is_yolo_dataset_layout(dataset_root: Path) -> bool:
+    required_dirs = (
+        dataset_root / "images" / "train",
+        dataset_root / "images" / "val",
+        dataset_root / "labels" / "train",
+        dataset_root / "labels" / "val",
+    )
+    return all(p.exists() and p.is_dir() for p in required_dirs)
+
+
+def _list_tiff_images(images_dir: Path) -> List[Path]:
+    if not images_dir.exists() or not images_dir.is_dir():
+        return []
+    return sorted(
+        [p for p in images_dir.iterdir() if p.is_file() and p.suffix.lower() in (".tif", ".tiff")]
+    )
+
+
+def _ensure_empty_yolo_labels(yolo_root: Path) -> int:
+    created = 0
+    for split in ("train", "val"):
+        image_dir = yolo_root / "images" / split
+        label_dir = yolo_root / "labels" / split
+        if not image_dir.exists():
+            continue
+        label_dir.mkdir(parents=True, exist_ok=True)
+        for image_path in _list_tiff_images(image_dir):
+            label_path = label_dir / f"{image_path.stem}.txt"
+            if label_path.exists():
+                continue
+            label_path.write_text("", encoding="utf-8")
+            created += 1
+    return created
+
+
+def _is_flat_raw_layout(dataset_root: Path) -> bool:
+    images_dir = dataset_root / "images"
+    ann_dir = dataset_root / "yolo_annotations"
+    if not (images_dir.exists() and images_dir.is_dir() and ann_dir.exists() and ann_dir.is_dir()):
+        return False
+    if _is_yolo_dataset_layout(dataset_root):
+        return False
+    return len(_list_tiff_images(images_dir)) > 0
+
+
+def _prepare_dataset_layout(
+    dataset_root: Path,
+    split_ratio: float = 0.8,
+    split_seed: int = 42,
+) -> Path:
+    """Ensure dataset is in YOLO layout; convert flat raw layout if needed."""
+    if _is_yolo_dataset_layout(dataset_root):
+        return dataset_root
+
+    if not _is_flat_raw_layout(dataset_root):
+        raise RuntimeError(
+            "Unsupported dataset layout. Expected either YOLO layout "
+            "(images/train,val + labels/train,val) or flat raw layout (images + yolo_annotations)."
+        )
+
+    if not (0.0 < float(split_ratio) < 1.0):
+        raise ValueError(f"--raw-split-ratio must be in (0, 1), got {split_ratio}")
+
+    converted_root = dataset_root.parent / f"{dataset_root.name}_yolo"
+    if converted_root.exists():
+        return converted_root
+
+    images_dir = dataset_root / "images"
+    ann_dir = dataset_root / "yolo_annotations"
+    image_paths = _list_tiff_images(images_dir)
+    if not image_paths:
+        raise RuntimeError(f"No TIFF images found in raw images directory: {images_dir}")
+
+    paired: List[Tuple[Path, Path | None]] = []
+    missing_label_count = 0
+    for image_path in image_paths:
+        label_path = ann_dir / f"{image_path.stem}.txt"
+        if not label_path.exists():
+            paired.append((image_path, None))
+            missing_label_count += 1
+            continue
+        paired.append((image_path, label_path))
+
+    rng = random.Random(split_seed)
+    rng.shuffle(paired)
+    split_idx = int(round(len(paired) * split_ratio))
+    split_idx = max(1, min(len(paired) - 1, split_idx)) if len(paired) > 1 else 1
+    train_pairs = paired[:split_idx]
+    val_pairs = paired[split_idx:] if len(paired) > 1 else paired
+
+    for sub in ("images/train", "images/val", "labels/train", "labels/val"):
+        (converted_root / sub).mkdir(parents=True, exist_ok=True)
+
+    for image_path, label_path in train_pairs:
+        shutil.copy2(image_path, converted_root / "images" / "train" / image_path.name)
+        dst_label = converted_root / "labels" / "train" / f"{image_path.stem}.txt"
+        if label_path is None:
+            dst_label.write_text("", encoding="utf-8")
+        else:
+            shutil.copy2(label_path, dst_label)
+    for image_path, label_path in val_pairs:
+        shutil.copy2(image_path, converted_root / "images" / "val" / image_path.name)
+        dst_label = converted_root / "labels" / "val" / f"{image_path.stem}.txt"
+        if label_path is None:
+            dst_label.write_text("", encoding="utf-8")
+        else:
+            shutil.copy2(label_path, dst_label)
+
+    print(f"Converted raw dataset layout to YOLO split: {converted_root}")
+    print(f"Train/Val split: {len(train_pairs)}/{len(val_pairs)} (seed={split_seed}, ratio={split_ratio})")
+    if missing_label_count > 0:
+        print(
+            f"Raw dataset contains {missing_label_count} unlabeled images. "
+            "Created empty YOLO label files for them."
+        )
+    return converted_root
+
+
 def convert_tifs_to_float32(
     dataset_root: Path,
     reuse_prepared: bool = False,
@@ -821,6 +985,9 @@ def convert_tifs_to_float32(
         raise ValueError("--reuse-prepared and --force-rebuild-prepared cannot be used together.")
     if prepared_root.exists():
         if reuse_prepared:
+            created = _ensure_empty_yolo_labels(prepared_root)
+            if created > 0:
+                print(f"Prepared dataset missing {created} label files; created empty labels automatically.")
             return prepared_root
         if force_rebuild_prepared:
             try:
@@ -828,8 +995,14 @@ def convert_tifs_to_float32(
             except OSError as exc:
                 raise RuntimeError(f"Failed to clean prepared dataset directory: {prepared_root}") from exc
         else:
+            created = _ensure_empty_yolo_labels(prepared_root)
+            if created > 0:
+                print(f"Prepared dataset missing {created} label files; created empty labels automatically.")
             return prepared_root
     shutil.copytree(dataset_root, prepared_root)
+    created = _ensure_empty_yolo_labels(prepared_root)
+    if created > 0:
+        print(f"Prepared dataset missing {created} label files; created empty labels automatically.")
 
     rng = random.Random(augment_seed)
     np_rng = np.random.default_rng(augment_seed)
@@ -838,10 +1011,10 @@ def convert_tifs_to_float32(
         label_dir = prepared_root / "labels" / split
         if not image_dir.exists():
             continue
-        all_paths = list(image_dir.glob("*.tif")) + list(image_dir.glob("*.tiff"))
+        all_paths = _list_tiff_images(image_dir)
         for tif_path in all_paths:
-            with Image.open(tif_path) as img:
-                arr = np.array(img)
+            # Read from bytes to avoid Windows file-locking issues and preserve source bit-depth.
+            arr = _read_tiff_array_lossless(tif_path)
             arr_f32 = _convert_to_float32_single_channel(arr, normalize_mode=normalize_mode)
             save_path = tif_path.with_suffix(".tif")
             Image.fromarray(arr_f32, mode="F").save(save_path)
@@ -858,8 +1031,7 @@ def convert_tifs_to_float32(
                     if cached is not None:
                         sample_cache.move_to_end(path)
                         return cached
-                    with Image.open(path) as img:
-                        arr = np.array(img, dtype=np.float32)
+                    arr = _read_tiff_array_lossless(path).astype(np.float32)
                     arr = _clip01(arr)
                     labels = _read_yolo_labels(label_dir / f"{path.stem}.txt")
                     sample = (arr, labels)
@@ -896,14 +1068,16 @@ def write_data_yaml(dataset_root: Path, class_names: List[str]) -> Path:
         "path": str(dataset_root.resolve()),
         "train": "images/train",
         "val": "images/val",
+        "channels": 1,
         "names": {i: name for i, name in enumerate(class_names)},
     }
     data_yaml = dataset_root / "rtdetr_data.yaml"
     data_yaml.write_text(
-        "path: {}\ntrain: {}\nval: {}\nnames:\n{}\n".format(
+        "path: {}\ntrain: {}\nval: {}\nchannels: {}\nnames:\n{}\n".format(
             data["path"],
             data["train"],
             data["val"],
+            data["channels"],
             "\n".join([f"  {i}: {name}" for i, name in data["names"].items()]),
         ),
         encoding="utf-8",
@@ -983,6 +1157,59 @@ def _resolve_run_dir(train_result, model, default_run_dir: Path) -> Path:
     return Path(save_dir) if save_dir else default_run_dir
 
 
+def _enable_single_channel_input_compat(model_like) -> None:
+    """Allow 1-channel TIFF inputs with RGB-pretrained Ultralytics models."""
+    pt_model = getattr(model_like, "model", model_like)
+    if hasattr(pt_model, "module") and isinstance(pt_model.module, torch.nn.Module):
+        pt_model = pt_model.module
+    if not isinstance(pt_model, torch.nn.Module):
+        return
+    if getattr(pt_model, "_single_channel_compat_enabled", False):
+        return
+
+    first_conv_name = ""
+    first_conv = None
+    for name, module in pt_model.named_modules():
+        if isinstance(module, torch.nn.Conv2d):
+            first_conv_name = name
+            first_conv = module
+            break
+
+    if first_conv is None or int(first_conv.in_channels) != 3 or int(first_conv.groups) != 1:
+        return
+
+    new_conv = torch.nn.Conv2d(
+        in_channels=1,
+        out_channels=first_conv.out_channels,
+        kernel_size=first_conv.kernel_size,
+        stride=first_conv.stride,
+        padding=first_conv.padding,
+        dilation=first_conv.dilation,
+        groups=1,
+        bias=first_conv.bias is not None,
+        padding_mode=first_conv.padding_mode,
+        device=first_conv.weight.device,
+        dtype=first_conv.weight.dtype,
+    )
+    with torch.no_grad():
+        new_conv.weight.copy_(first_conv.weight.mean(dim=1, keepdim=True))
+        if first_conv.bias is not None:
+            new_conv.bias.copy_(first_conv.bias)
+
+    parent = pt_model
+    parts = first_conv_name.split(".") if first_conv_name else []
+    for part in parts[:-1]:
+        parent = parent[int(part)] if part.isdigit() else getattr(parent, part)
+    if parts:
+        leaf = parts[-1]
+        if leaf.isdigit():
+            parent[int(leaf)] = new_conv
+        else:
+            setattr(parent, leaf, new_conv)
+
+    pt_model._single_channel_compat_enabled = True
+
+
 def main() -> None:
     args = parse_args()
     if args.augment_copies < 0:
@@ -1008,7 +1235,11 @@ def main() -> None:
     print("uint16 TIFF augmentation compatibility check passed.")
 
     prepared_root = convert_tifs_to_float32(
-        args.dataset_root,
+        _prepare_dataset_layout(
+            args.dataset_root,
+            split_ratio=args.raw_split_ratio,
+            split_seed=args.raw_split_seed,
+        ),
         reuse_prepared=args.reuse_prepared,
         force_rebuild_prepared=args.force_rebuild_prepared,
         augment_copies=args.augment_copies,
@@ -1023,6 +1254,7 @@ def main() -> None:
         preset_sha256=args.preset_sha256,
     )
     model = RTDETR(model_path) if model_family == "rtdetr" else YOLO(model_path)
+    _enable_single_channel_input_compat(model)
     default_run_dir = Path(args.project) / args.name
     tb_writer = None
 
@@ -1055,6 +1287,13 @@ def main() -> None:
     def on_train_end(trainer) -> None:
         _close_tb_writer()
 
+    def on_train_start(trainer) -> None:
+        _enable_single_channel_input_compat(trainer.model)
+        ema_model = getattr(getattr(trainer, "ema", None), "ema", None)
+        if ema_model is not None:
+            _enable_single_channel_input_compat(ema_model)
+
+    model.add_callback("on_train_start", on_train_start)
     model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
     model.add_callback("on_train_end", on_train_end)
     try:

@@ -4,9 +4,10 @@
 
 ## 功能
 
-- 读取数据集（YOLO 目录结构）：
-  - `images/train`, `images/val`
-  - `labels/train`, `labels/val`
+- 读取数据集（支持两种输入结构）：
+  - YOLO 结构：`images/train`, `images/val`, `labels/train`, `labels/val`
+  - 原始扁平结构：`images/*.tif(f)` + `yolo_annotations/*.txt`（脚本会自动切分并转换为 YOLO 结构）
+- 支持无标注样本：若某张图缺少对应 `.txt`，会自动创建空标签文件（表示该图无目标）
 - 将 TIFF 图像转换为 **float32 单通道 TIFF**（不使用 8-bit PNG；当像素范围为 0~63 时按 6-bit 线性归一化）
 - 训练前对训练集支持离线数据增强（可配置增强副本数）：
   - Mosaic（多图拼接小目标增强）
@@ -81,6 +82,9 @@ python train_rtdetr.py \
   - 若该目录已存在，默认直接复用；
   - 可使用 `--force-rebuild-prepared` 强制重建；
   - 可使用 `--reuse-prepared` 显式声明复用（与 `--force-rebuild-prepared` 互斥）。
+- 若输入为原始扁平结构，会先自动生成 `<dataset-root>_yolo`：
+  - `--raw-split-ratio`：训练集占比（默认 `0.8`）
+  - `--raw-split-seed`：切分随机种子（默认 `42`）
 - 增强参数：
   - `--augment-copies`：每张训练图像生成多少份离线增强样本（默认 0，即不额外生成）。
   - `--augment-seed`：离线增强随机种子（默认 42）。
@@ -93,7 +97,7 @@ python train_rtdetr.py \
     - `--augment-gamma-prob`（默认 `0.5`）
     - `--augment-hist-perturb-prob`（默认 `0.5`）
 - 归一化策略（`--normalize-mode`）：
-  - `per_image`（默认）：按单图动态范围归一化。
+  - `per_image`（默认）：按像素位深上限归一化（优先保持物理强度比例；`<=63` 按 6-bit，`uint16` 按 65535，`uint8` 按 255）。
   - `fixed_6bit`：固定按 `63` 归一化。
   - `fixed_uint16`：固定按 `65535` 归一化。
 
