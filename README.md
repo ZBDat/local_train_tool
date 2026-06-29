@@ -71,6 +71,27 @@ python train_rtdetr.py \
   --name rtdetr_train
 ```
 
+## 推荐默认参数脚本
+
+仓库新增 `run_train.py`，可直接使用推荐默认参数启动训练，并支持命令行覆盖：
+
+```bash
+python run_train.py \
+  --dataset-root /path/to/dataset \
+  --class-names object
+```
+
+例如覆盖部分参数：
+
+```bash
+python run_train.py \
+  --dataset-root /path/to/dataset \
+  --class-names object \
+  --epochs 200 \
+  --batch 8 \
+  --model coco-rtdetr-x
+```
+
 说明：
 - 可使用本地模型路径或官方权重名（例如：`rtdetr-l.pt`、`rtdetr-x.pt`、`yolo11x.pt`、`yolov8x.pt`）：
   - `--model /path/to/your_model.pt`
