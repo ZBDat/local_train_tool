@@ -71,25 +71,19 @@ python train_rtdetr.py \
   --name rtdetr_train
 ```
 
-## 推荐默认参数脚本
+## Windows CMD 便捷脚本
 
-仓库新增 `run_train.py`，可直接使用推荐默认参数启动训练，并支持命令行覆盖：
+仓库提供 `run_train.cmd` 作为命令行便捷工具，程序入口仍为 `train_rtdetr.py`。  
+双击或在 Windows 终端执行该脚本时，会按推荐默认参数调用 `train_rtdetr.py`。
 
-```bash
-python run_train.py \
-  --dataset-root /path/to/dataset \
-  --class-names object
+```bat
+run_train.cmd
 ```
 
-例如覆盖部分参数：
+也可以在命令末尾追加参数覆盖默认值（会透传给 `train_rtdetr.py`）：
 
-```bash
-python run_train.py \
-  --dataset-root /path/to/dataset \
-  --class-names object \
-  --epochs 200 \
-  --batch 8 \
-  --model coco-rtdetr-x
+```bat
+run_train.cmd --dataset-root D:\data\dataset --class-names object --epochs 200 --batch 8 --model coco-rtdetr-x
 ```
 
 说明：
