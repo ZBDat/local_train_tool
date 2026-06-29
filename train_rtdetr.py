@@ -79,7 +79,7 @@ TRUSTED_WEIGHT_HOSTS = {
 }
 SAFE_WEIGHT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+\.pt$")
 SAFE_SHA256_HEX = re.compile(r"^[A-Fa-f0-9]{64}$")
-NORMALIZE_MODES = ("per_image", "fixed_6bit", "fixed_uint16")
+NORMALIZE_MODES = ("per_image", "fixed_uint16")
 MAX_AUG_IMAGE_CACHE = 16
 
 
@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
         type=str,
         choices=NORMALIZE_MODES,
         default="per_image",
-        help="Image normalization mode: per_image / fixed_6bit / fixed_uint16.",
+        help="Image normalization mode: per_image / fixed_uint16.",
     )
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch", type=int, default=16)
@@ -307,8 +307,6 @@ def _convert_to_float32_single_channel(arr: np.ndarray, normalize_mode: str = "p
     if normalize_mode not in NORMALIZE_MODES:
         raise ValueError(f"Unsupported normalize mode: {normalize_mode}")
 
-    if normalize_mode == "fixed_6bit":
-        return _clip01(arr.astype(np.float32) / 63.0)
     if normalize_mode == "fixed_uint16":
         return _clip01(arr.astype(np.float32) / 65535.0)
 
@@ -318,8 +316,6 @@ def _convert_to_float32_single_channel(arr: np.ndarray, normalize_mode: str = "p
             return np.zeros_like(arr, dtype=np.float32)
         arr_nonneg = np.clip(arr, 0, None).astype(np.float64, copy=False)
         dtype_max = int(np.iinfo(arr.dtype).max)
-        if max_val <= 63:
-            return _clip01((arr_nonneg / 63.0).astype(np.float32))
         if dtype_max > 0:
             return _clip01((arr_nonneg / float(dtype_max)).astype(np.float32))
         return _clip01((arr_nonneg / float(max_val)).astype(np.float32))
@@ -335,8 +331,6 @@ def _convert_to_float32_single_channel(arr: np.ndarray, normalize_mode: str = "p
         clipped = np.clip(arr, 0.0, None)
         if max_val <= 1.0:
             return _clip01(clipped)
-        if max_val <= 63.0:
-            return _clip01((clipped / 63.0).astype(np.float32))
         if max_val <= 255.0:
             return _clip01((clipped / 255.0).astype(np.float32))
         if max_val <= 65535.0:
