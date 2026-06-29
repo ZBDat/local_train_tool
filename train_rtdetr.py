@@ -316,7 +316,7 @@ def _convert_to_float32_single_channel(arr: np.ndarray, normalize_mode: str = "p
             return np.zeros_like(arr, dtype=np.float32)
         arr_nonneg = np.clip(arr, 0, None).astype(np.float64, copy=False)
         dtype_max = int(np.iinfo(arr.dtype).max)
-        if dtype_max == 255:
+        if arr.dtype == np.uint8:
             return _clip01((arr_nonneg / 255.0).astype(np.float32))
         if dtype_max > 0:
             return _clip01((arr_nonneg / float(dtype_max)).astype(np.float32))
