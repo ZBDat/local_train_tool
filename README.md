@@ -1,6 +1,6 @@
 # local_train_tool
 
-通用目标检测训练流水线（支持 6-bit 数值范围的 `.tif` 图像 + YOLO 单行 `.txt` 标签）。
+通用目标检测训练流水线（支持 `.tif` 图像 + YOLO 单行 `.txt` 标签）。
 
 提供两套训练入口：
 
@@ -13,7 +13,7 @@
   - YOLO 结构：`images/train`, `images/val`, `labels/train`, `labels/val`
   - 原始扁平结构：`images/*.tif(f)` + `yolo_annotations/*.txt`（脚本会自动切分并转换为 YOLO 结构）
 - 支持无标注样本：若某张图缺少对应 `.txt`，会自动创建空标签文件（表示该图无目标）
-- 将 TIFF 图像转换为 **float32 单通道 TIFF**（不使用 8-bit PNG；当像素范围为 0~63 时按 6-bit 线性归一化）
+- 将 TIFF 图像转换为 **float32 单通道 TIFF**（不使用 8-bit PNG；按输入位深进行线性归一化）
 - 训练前对训练集支持离线数据增强（可配置增强副本数）：
   - Mosaic（多图拼接小目标增强）
   - random crop（裁剪后缩放回原尺寸）
@@ -78,6 +78,21 @@ python train_rtdetr.py \
   --name rtdetr_train
 ```
 
+## Windows CMD 便捷脚本
+
+仓库提供 `run_train.cmd` 作为命令行便捷工具，程序入口仍为 `train_rtdetr.py`。  
+双击或在 Windows 终端执行该脚本时，会按推荐默认参数调用 `train_rtdetr.py`。
+
+```bat
+run_train.cmd
+```
+
+也可以在命令末尾追加参数覆盖默认值（会透传给 `train_rtdetr.py`）：
+
+```bat
+run_train.cmd --dataset-root D:\data\dataset --class-names object --epochs 200 --batch 8 --model coco-rtdetr-x
+```
+
 说明：
 - 可使用本地模型路径或官方权重名（例如：`rtdetr-l.pt`、`rtdetr-x.pt`、`yolo11x.pt`、`yolov8x.pt`）：
   - `--model /path/to/your_model.pt`
@@ -104,8 +119,7 @@ python train_rtdetr.py \
     - `--augment-gamma-prob`（默认 `0.5`）
     - `--augment-hist-perturb-prob`（默认 `0.5`）
 - 归一化策略（`--normalize-mode`）：
-  - `per_image`（默认）：按像素位深上限归一化（优先保持物理强度比例；`<=63` 按 6-bit，`uint16` 按 65535，`uint8` 按 255）。
-  - `fixed_6bit`：固定按 `63` 归一化。
+  - `per_image`（默认）：按像素位深上限归一化（优先保持物理强度比例；`uint16` 按 65535，`uint8` 按 255）。
   - `fixed_uint16`：固定按 `65535` 归一化。
 
 ## TensorBoard 监控
