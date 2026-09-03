@@ -2,3 +2,5 @@ ultralytics
 numpy
 pillow
 tensorboard
+monai
+itk

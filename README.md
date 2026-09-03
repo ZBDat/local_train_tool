@@ -2,6 +2,11 @@
 
 通用目标检测训练流水线（支持 6-bit 数值范围的 `.tif` 图像 + YOLO 单行 `.txt` 标签）。
 
+提供两套训练入口：
+
+- `train_rtdetr.py`：基于 Ultralytics 训练接口（RT-DETR / YOLO），预处理阶段会把数据量化后交给 Ultralytics 管线。
+- `train_monai_rtdetr.py`：**MONAI 16 位数据管线 + RT-DETR**，全程保留 uint16 位深（float32 [0,1] 输入模型），绕开 Ultralytics 训练管线中硬编码的 8-bit 假设（mosaic 画布 uint8、`/255` 归一化等）。适合需要真正保留高位深数据的训练场景。
+
 ## 功能
 
 - 读取数据集（支持两种输入结构）：
@@ -45,8 +50,10 @@
 ## 安装依赖
 
 ```bash
-pip install ultralytics pillow numpy tensorboard
+pip install ultralytics pillow numpy tensorboard monai itk
 ```
+
+`train_monai_rtdetr.py` 依赖 `monai` 与 `itk`（MONAI 用 ITK 读取 16 位 TIFF）。若 MONAI 加载失败会自动回退到 Pillow 读取（同样保留 uint16）。
 
 ## 训练命令示例
 
@@ -108,3 +115,32 @@ tensorboard --logdir runs/detect
 ```
 
 然后在浏览器打开输出地址查看训练/验证损失曲线。
+
+## MONAI 16 位训练（train_monai_rtdetr.py）
+
+```bash
+python train_monai_rtdetr.py \
+  --dataset-root /path/to/dataset \
+  --class-names object \
+  --model weights/rtdetr-l.pt \
+  --epochs 100 \
+  --batch 4 \
+  --imgsz 640 \
+  --normalize-mode per_image \
+  --device 0 \
+  --project runs/detect \
+  --name monai_rtdetr
+```
+
+数据流：`uint16 TIFF → MONAI LoadImage(ITK) → ScaleIntensityRange/[0,1] float32 → 实时 box 同步增强 → letterbox（pad=0.447）→ RT-DETR 自定义训练循环`。
+
+说明：
+- `--model` 支持本地 RT-DETR 权重或 preset（`coco-rtdetr-l` / `coco-rtdetr-x`）。
+- 直接读取原始 `uint16` TIFF，**不做** 8-bit 量化；输出由模型第一个卷积自动 patch 成 1 通道（RGB 均值初始化后全量微调）。
+- 增强在管线内实时进行（复用 `train_rtdetr.py` 的 box 同步增强函数），不产生额外文件。
+- 训练开始前自动保存 `train_batch_preview.jpg` / `val_batch_preview.jpg`（与 Ultralytics `train_batch*.jpg` 同款网格图，含 GT 框标注），方便核对数据加载与增强效果；可用 `--no-plot-batch` 关闭。
+- `--pad-val`：letterbox 灰边值，默认 `0.447`（=114/255，对齐 COCO 预训练填充语义）。
+- `--val-metric map`：按 mAP50-95 选优存 `best.pt`；`--val-metric loss` 则按 val 总损失选优。
+- 训练产物：`best.pt` / `last.pt` / `best_val_loss.json` / `results.csv` / TensorBoard 事件。
+- `--resume <last.pt>`：从断点继续训练。
+- 空目标 batch 自动跳过（RT-DETR denoising 需要 GT）；单卡训练（多卡 DDP 暂未支持）。
